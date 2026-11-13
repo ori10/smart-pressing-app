@@ -1,0 +1,24 @@
+{
+  "name": "smart-pressing-app",
+  "version": "1.0.0",
+  "description": "Smart Pressing : appli Android autonome (données dans le téléphone)",
+  "scripts": {
+    "serve": "npx http-server www -p 8080",
+    "sync": "npx cap sync android"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/app": "^7.1.2",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10",
+    "@capacitor/filesystem": "^7.1.9",
+    "@capacitor/share": "^7.0.4",
+    "@fontsource/plus-jakarta-sans": "^5.3.0",
+    "@zxing/library": "^0.21.3",
+    "jsbarcode": "^3.12.3",
+    "jspdf": "^2.5.2"
+  },
+  "private": true
+}

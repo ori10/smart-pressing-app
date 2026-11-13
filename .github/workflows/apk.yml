@@ -1,0 +1,43 @@
+name: Construire l'APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: Dépendances
+        run: npm ci
+      - name: Copier l'appli dans le projet Android
+        run: npx cap sync android
+      - name: Compiler l'APK
+        working-directory: android
+        run: chmod +x gradlew && ./gradlew assembleRelease --no-daemon
+      - name: Renommer
+        run: cp android/app/build/outputs/apk/release/app-release.apk SmartPressing.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SmartPressing-apk
+          path: SmartPressing.apk
+      - name: Publier dans « Releases »
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Smart Pressing 1.0.${{ github.run_number }}
+          body: Téléchargez SmartPressing.apk sur le téléphone Android et ouvrez-le pour l'installer.
+          files: SmartPressing.apk

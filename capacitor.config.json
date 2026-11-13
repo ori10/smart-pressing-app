@@ -1,0 +1,6 @@
+{
+  "appId": "com.smartpressing.app",
+  "appName": "Smart Pressing",
+  "webDir": "www",
+  "android": { "allowMixedContent": false }
+}
