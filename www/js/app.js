@@ -1,6 +1,8 @@
 import { db } from './db.js';
 import * as L from './logic.js';
 import { invoicePdf } from './pdf.js';
+import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
+import * as Charts from './charts.js';
 import { shareFile, saveFile, openExternal, waNumber, isNative } from './native.js';
 import { beep } from './scan.js';
 
@@ -49,7 +51,7 @@ function toast(msg, err = false) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = ''; }, 2600);
 }
 
-function ask({ title, text = '', ok = 'Confirmer', cancel = 'Annuler', danger = false, body = '' }) {
+function ask({ title, text = '', ok = 'Confirmer', cancel = 'Annuler', danger = false, body = '', onOpen = null }) {
   return new Promise((resolve) => {
     const bg = document.createElement('div');
     bg.className = 'modal-bg';
@@ -57,6 +59,7 @@ function ask({ title, text = '', ok = 'Confirmer', cancel = 'Annuler', danger = 
       <div class="btns" style="margin-top:12px"><button class="btn ghost" data-r="0">${esc(cancel)}</button>
       <button class="btn ${danger ? 'danger' : 'primary'}" data-r="1">${esc(ok)}</button></div></div>`;
     document.body.appendChild(bg);
+    if (onOpen) onOpen(bg);
     bg.addEventListener('click', (e) => {
       const r = e.target.closest('[data-r]');
       if (e.target === bg || r) {
@@ -541,35 +544,71 @@ function needAdmin(name) {
 routes.bilan = async (_, q) => {
   if (needAdmin('bilan')) return;
   setNav('more');
-  setTop({ title: 'Bilan', back: '#/more' });
-  const kind = q.get('k') || 'month';
+  setTop({ title: 'Bilan', back: '#/more', right: '<button class="pill" id="b-export">⇩ Exporter</button>' });
+  const kind = ['month', 'half', 'year'].includes(q.get('k')) ? q.get('k') : 'month';
   const off = Number(q.get('o') || 0);
   const p = L.period(kind, off);
   const [orders, expenses] = [await db.all('orders'), await db.all('expenses')];
   const b = L.computeBilan(orders, expenses, p, S);
   const today = L.todayIso();
-  let chart = '';
-  if (kind === 'year') {
-    const months = Array.from({ length: 12 }, (_, i) => `${p.start.slice(0, 4)}-${L.pad(i + 1)}`);
-    const max = Math.max(1, ...months.map((m) => (b.byMonth[m] || {}).ca || 0));
-    chart = `<div class="bars">${months.map((m) => `<div style="height:${(((b.byMonth[m] || {}).ca || 0) / max) * 100}%" title="${money((b.byMonth[m] || {}).ca)}"></div>`).join('')}</div>
-      <div class="bars-x">${months.map((m) => `<span>${L.monthName(Number(m.slice(5)) - 1).slice(0, 3)}</span>`).join('')}</div>`;
-  } else {
+  const fm = (n) => money(n);
+
+  // Graphique principal
+  let main;
+  if (kind === 'month') {
     const days = L.daysBetween(p.start, p.end);
-    const max = Math.max(1, ...days.map((d) => b.byDay[d] || 0));
-    chart = `<div class="bars">${days.map((d) => `<div class="${d === today ? 'today' : ''}" style="height:${((b.byDay[d] || 0) / max) * 100}%"></div>`).join('')}</div>
-      <div class="bars-x">${days.map((d, i) => `<span>${kind === 'week' || i % 5 === 0 ? d.slice(8) : ''}</span>`).join('')}</div>`;
+    main = `<h3 class="ch-title">Chiffre d'affaires par jour</h3>` + Charts.barChart({
+      labels: days.map((d) => String(Number(d.slice(8)))), tips: days.map((d) => fmtDate(d, false)),
+      series: [{ name: "Chiffre d'affaires", color: Charts.C.ca, values: days.map((d) => b.byDay[d] || 0) }],
+      fmt: fm, highlight: days.indexOf(today), every: 5,
+    });
+  } else {
+    const months = L.monthsBetween(p.start, p.end);
+    const mm = months.map((m) => b.byMonth[m] || { ca: 0, wash: 0, exp: 0, inv: 0 });
+    const lab = months.map((m) => L.monthShort(Number(m.slice(5)) - 1));
+    const tips = months.map((m) => L.monthName(Number(m.slice(5)) - 1) + ' ' + m.slice(0, 4));
+    main = `<h3 class="ch-title">Recettes et charges par mois</h3>` + Charts.barChart({
+      labels: lab, tips, fmt: fm,
+      series: [
+        { name: "Chiffre d'affaires", color: Charts.C.ca, values: mm.map((r) => r.ca) },
+        { name: 'Lavage cousin', color: Charts.C.wash, values: mm.map((r) => r.wash) },
+        { name: 'Dépenses', color: Charts.C.exp, values: mm.map((r) => r.exp + r.inv) },
+      ],
+    }) + `<h3 class="ch-title" style="margin-top:18px">Bénéfice net par mois</h3>` + Charts.barChart({
+      labels: lab, tips, fmt: fm, height: 150,
+      series: [{ name: 'Bénéfice net', color: Charts.C.pos, colorFn: (v) => (v < 0 ? Charts.C.neg : Charts.C.pos), values: mm.map((r) => r.ca - r.wash - r.exp) }],
+    });
   }
-  const yearTable = kind === 'year' ? `<div class="card"><h2 style="margin-top:0">Mois par mois</h2><table class="t"><tr><th>Mois</th><th>CA</th><th>Lavage</th><th>Dépenses</th><th>Net</th></tr>
-    ${Array.from({ length: 12 }, (_, i) => { const m = `${p.start.slice(0, 4)}-${L.pad(i + 1)}`; const r = b.byMonth[m] || { ca: 0, wash: 0, exp: 0, inv: 0 };
-      return `<tr><td>${L.monthName(i).slice(0, 4)}.</td><td>${money(r.ca)}</td><td>${money(r.wash)}</td><td>${money(r.exp + r.inv)}</td><td><b>${money(r.ca - r.wash - r.exp - r.inv)}</b></td></tr>`; }).join('')}</table></div>` : '';
-  const maxArt = Math.max(1, ...b.topArticles.map((a) => a[1]));
-  const v = view(`<div class="chips" style="margin-bottom:0">${[['week', 'Semaine'], ['month', 'Mois'], ['year', 'Année']].map(([k, l]) => `<a class="chip ${k === kind ? 'on' : ''}" href="#/bilan?k=${k}">${l}</a>`).join('')}</div>
-    <div class="periodnav"><button data-o="${off - 1}">‹</button><div class="lbl">${p.label}</div><button data-o="${off + 1}" ${off >= 0 ? 'disabled style="opacity:.3"' : ''}>›</button></div>
-    <div class="kpis"><div class="kpi"><span>Chiffre d'affaires</span><b>${money(b.ca)}</b></div><div class="kpi"><span>Encaissé</span><b>${money(b.cashed)}</b></div>
-      <div class="kpi"><span>Commandes</span><b>${b.orders}</b></div><div class="kpi"><span>Impayés</span><b style="color:${b.unpaid ? 'var(--red)' : 'inherit'}">${money(b.unpaid)}</b></div></div>
-    <div class="card" style="margin-top:12px"><b class="small muted">CA par ${kind === 'year' ? 'mois' : 'jour'}</b>${chart}</div>
+
+  const split = Charts.splitBar([
+    { name: 'Lavage cousin', value: b.wash, color: Charts.C.wash },
+    { name: 'Dépenses courantes', value: b.current, color: Charts.C.exp },
+    { name: 'Bénéfice net', value: Math.max(0, b.net), color: Charts.C.pos },
+  ], fm);
+  const cats = Object.entries(b.expByCat).sort((a, c) => c[1] - a[1]).map(([k, v]) => [L.catLabel(k), v]);
+  const prevP = L.period(kind, off - 1);
+  const prev = L.computeBilan(orders, expenses, prevP, S);
+  const delta = (cur, old) => {
+    if (!old) return '';
+    const d = Math.round(((cur - old) / Math.abs(old)) * 100);
+    return `<em class="${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(d)} %</em>`;
+  };
+
+  const v = view(`<div class="seg">${[['month', 'Mois'], ['half', '6 mois'], ['year', 'Année']].map(([k, l]) => `<a class="${k === kind ? 'on' : ''}" href="#/bilan?k=${k}">${l}</a>`).join('')}</div>
+    <div class="periodnav"><button data-o="${off - 1}" aria-label="Précédent">‹</button><div class="lbl">${p.label}</div><button data-o="${off + 1}" ${off >= 0 ? 'disabled style="opacity:.3"' : ''} aria-label="Suivant">›</button></div>
+    <div class="hero ${b.net < 0 ? 'neg' : ''}"><span>Bénéfice net</span><b>${money(b.net)}</b>
+      <small>${b.orders} commande(s) · CA ${money(b.ca)} ${delta(b.ca, prev.ca)}</small></div>
+    <div class="kpis" style="margin-top:10px">
+      <div class="kpi"><span>Chiffre d'affaires</span><b>${money(b.ca)}</b>${delta(b.ca, prev.ca)}</div>
+      <div class="kpi"><span>Marge après lavage</span><b>${money(b.margin)}</b>${delta(b.margin, prev.margin)}</div>
+      <div class="kpi"><span>Encaissé</span><b>${money(b.cashed)}</b></div>
+      <div class="kpi"><span>Impayés</span><b style="color:${b.unpaid ? 'var(--red)' : 'inherit'}">${money(b.unpaid)}</b></div></div>
+    <p class="small muted" style="margin:6px 2px 0">Les pourcentages comparent à la période précédente (${prevP.label}). Touchez un graphique pour voir les valeurs.</p>
+    <div class="card" style="margin-top:12px">${main}</div>
+    <div class="card"><h3 class="ch-title">Où va le chiffre d'affaires</h3>${split}${b.net < 0 ? `<p class="small" style="color:var(--red);margin:8px 0 0;font-weight:600">Les charges dépassent le chiffre d'affaires de ${money(-b.net)}.</p>` : ''}</div>
+    ${b.washRatio > 0.35 ? `<div class="alert" style="margin-bottom:12px">Le lavage représente ${Math.round(b.washRatio * 100)} % du CA (alerte au-dessus de 35 %). Vérifiez les prix ou le poids.</div>` : ''}
     <div class="card calc">
+      <h3 class="ch-title">Compte de résultat</h3>
       <div class="l"><span>Chiffre d'affaires (${b.orders} commandes)</span><span>${money(b.ca)}</span></div>
       <div class="l"><span>− Lavage chez le cousin (${L.kg(b.washKg)})</span><span>− ${money(b.wash)}</span></div>
       <div class="l sum"><span>= Marge après lavage</span><span>${money(b.margin)}</span></div>
@@ -578,14 +617,32 @@ routes.bilan = async (_, q) => {
       <div class="l"><span>− Investissements</span><span>− ${money(b.invest)}</span></div>
       <div class="l sum"><span>Net après investissements</span><span>${money(b.netAfterInvest)}</span></div>
     </div>
-    ${b.washRatio > 0.35 ? `<div class="alert" style="margin-bottom:12px">Le lavage représente ${Math.round(b.washRatio * 100)} % du CA (alerte au-dessus de 35 %). Vérifiez les prix ou le poids.</div>` : ''}
-    <div class="kpis"><div class="kpi"><span>À payer au cousin</span><b>${money(b.wash)}</b><span>${L.kg(b.washKg)} × ${money(S.cousinRate)}</span></div>
+    <div class="kpis"><div class="kpi"><span>À payer au cousin</span><b>${money(b.wash)}</b><span>${L.kg(b.washKg)} lavés</span></div>
       <div class="kpi"><span>À mettre de côté (${S.savingsPercent} %)</span><b>${money(b.savings)}</b><span>Lavage/CA ${Math.round(b.washRatio * 100)} %</span></div></div>
-    ${yearTable}
-    <div class="card" style="margin-top:12px"><h2 style="margin-top:0">Articles les plus lavés</h2>
-      ${b.topArticles.map(([n, c]) => `<div class="hbar"><span class="lbl">${esc(n)}</span><span class="track"><i style="width:${(c / maxArt) * 100}%"></i></span><b>${c}</b></div>`).join('') || '<p class="muted small">Aucune commande sur la période.</p>'}</div>
-    <a class="btn block" href="#/expenses">Voir et saisir les dépenses →</a>`);
+    ${cats.length ? `<div class="card" style="margin-top:12px"><h3 class="ch-title">Dépenses par catégorie</h3>${Charts.hbars(cats, fm, Charts.C.exp)}</div>` : ''}
+    <div class="card" style="margin-top:12px"><h3 class="ch-title">Articles les plus lavés</h3>
+      ${Charts.hbars(b.topArticles, (n) => n + ' pcs') || '<p class="muted small">Aucune commande sur la période.</p>'}</div>
+    <div class="btns"><button class="btn navy" id="b-pdf">⇩ Bilan en PDF</button><button class="btn green" id="b-xlsx">⇩ Bilan en Excel</button></div>
+    <a class="btn block ghost" href="#/expenses" style="margin-top:8px">Voir et saisir les dépenses →</a>`);
+  Charts.enableTips(v);
   $$('[data-o]', v).forEach((btn) => { btn.onclick = () => { if (!btn.disabled) location.hash = `#/bilan?k=${kind}&o=${btn.dataset.o}`; }; });
+  const doExport = async (fmt, btn) => busy(btn, async () => {
+    const blob = fmt === 'pdf' ? bilanPdf(b, p, S) : bilanXlsx(b, p, S);
+    const name = bilanFileName(p, fmt);
+    const r = await shareFile(blob, name, 'Bilan ' + p.label);
+    if (r === 'downloaded') toast('Fichier enregistré : ' + name);
+  });
+  $('#b-pdf', v).onclick = (e) => doExport('pdf', e.currentTarget);
+  $('#b-xlsx', v).onclick = (e) => doExport('xlsx', e.currentTarget);
+  $('#b-export').onclick = async () => {
+    const m = await ask({ title: 'Exporter le bilan', ok: 'Exporter',
+      body: `<p>${esc(p.label)}</p><div class="seg" style="margin-bottom:6px"><a class="on" data-f="pdf">PDF</a><a data-f="xlsx">Excel</a></div>
+        <p class="small muted" style="margin-top:8px">Changez de période (Mois, 6 mois, Année et flèches) avant d'exporter.</p>` ,
+      onOpen: (bg) => { bg.querySelectorAll('[data-f]').forEach((a) => { a.onclick = () => { bg.querySelectorAll('[data-f]').forEach((x) => x.classList.toggle('on', x === a)); }; }); } });
+    if (!m) return;
+    const f = m.querySelector('[data-f].on').dataset.f;
+    doExport(f, $('#b-export'));
+  };
 };
 
 routes.expenses = async (_, q) => {

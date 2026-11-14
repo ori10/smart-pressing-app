@@ -2,7 +2,8 @@
 
 Toute la gestion du pressing dans **un seul téléphone**, sans serveur ni internet :
 écran « Bienvenue / Se connecter », factures PDF, photos des pièces, circuit cousin → repassage → livraison,
-vérification pièce par pièce (on coche chaque pièce), bilan, dépenses et bénéfice net.
+vérification pièce par pièce (on coche chaque pièce), bilan par mois / 6 mois / année avec graphiques,
+export du bilan en PDF ou Excel, dépenses et bénéfice net.
 
 Les données sont enregistrées **dans le téléphone** (base IndexedDB de l'appli).
 

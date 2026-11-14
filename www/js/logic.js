@@ -266,6 +266,8 @@ export async function counts() {
 function ymd(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 const MONTHS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
 export const monthName = (m) => MONTHS[m];
+const MONTHS_SHORT = ['janv', 'févr', 'mars', 'avr', 'mai', 'juin', 'juil', 'août', 'sept', 'oct', 'nov', 'déc'];
+export const monthShort = (m) => MONTHS_SHORT[m];
 
 // kind: week | month | year ; offset: 0 = période en cours, -1 = précédente…
 export function period(kind, offset = 0) {
@@ -276,6 +278,13 @@ export function period(kind, offset = 0) {
     start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - day + offset * 7);
     end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
     label = `Semaine du ${pad(start.getDate())}/${pad(start.getMonth() + 1)} au ${pad(end.getDate())}/${pad(end.getMonth() + 1)}`;
+  } else if (kind === 'half') {
+    start = new Date(now.getFullYear(), now.getMonth() - 5 + offset * 6, 1);
+    end = new Date(start.getFullYear(), start.getMonth() + 6, 0);
+    const cap = (m) => MONTHS[m][0].toUpperCase() + MONTHS[m].slice(1);
+    label = start.getFullYear() === end.getFullYear()
+      ? `${cap(start.getMonth())} – ${cap(end.getMonth())} ${end.getFullYear()}`
+      : `${cap(start.getMonth())} ${start.getFullYear()} – ${cap(end.getMonth())} ${end.getFullYear()}`;
   } else if (kind === 'month') {
     start = new Date(now.getFullYear(), now.getMonth() + offset, 1);
     end = new Date(start.getFullYear(), start.getMonth() + 1, 0);
@@ -286,6 +295,13 @@ export function period(kind, offset = 0) {
     label = 'Année ' + start.getFullYear();
   }
   return { kind, offset, start: ymd(start), end: ymd(end), label };
+}
+
+export function monthsBetween(startIso, endIso) {
+  const out = [];
+  let [y, m] = startIso.split('-').map(Number);
+  while (`${y}-${pad(m)}` <= endIso.slice(0, 7)) { out.push(`${y}-${pad(m)}`); m++; if (m > 12) { m = 1; y++; } }
+  return out;
 }
 
 export function daysBetween(startIso, endIso) {
@@ -320,6 +336,8 @@ export function computeBilan(orders, expenses, p, settings) {
     if (catInvest(e.category)) bm.inv += e.amount; else bm.exp += e.amount;
   }
   r.expByCat = expByCat;
+  r.orderList = os.sort((a, b) => a.number - b.number);
+  r.expenseList = es.sort((a, b) => a.date.localeCompare(b.date));
   r.margin = r.ca - r.wash;
   r.washRatio = r.ca ? r.wash / r.ca : 0;
   r.net = r.margin - r.current;
