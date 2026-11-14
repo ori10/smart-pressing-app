@@ -1100,7 +1100,7 @@ function cloudForm(c) {
     <div><label class="f">Mot de passe des sauvegardes (6 caractères min.) — notez-le bien !</label><input class="i" id="cl-pass" type="password" value="${esc(c.password)}" autocomplete="off"></div>`;
 }
 function readCloudForm(root, prev = {}) {
-  return { ...prev, url: $('#cl-url', root).value.trim(), key: $('#cl-key', root).value.trim(), password: $('#cl-pass', root).value };
+  return { ...prev, url: Cloud.normalizeUrl($('#cl-url', root).value), key: $('#cl-key', root).value.trim().replace(/\s+/g, ''), password: $('#cl-pass', root).value };
 }
 async function pickAndRestore(c, after) {
   let list;
@@ -1182,6 +1182,7 @@ routes.backup = async () => {
     const c = readCloudForm(v, cloud);
     if (!/^(https:\/\/|http:\/\/localhost)/.test(c.url) || !c.key) throw new Error('Adresse ou clé manquante.');
     if ((c.password || '').length < 6) throw new Error('Mot de passe : 6 caractères minimum.');
+    if (/^sb_secret_/.test(c.key) || /service_role/.test(c.key)) throw new Error('Cette clé est la clé SECRÈTE : prenez la clé « publishable » (sb_publishable_…) ou « anon ».');
     await Cloud.backupNow(c);
     await Cloud.setCloud({ ...c, enabled: true });
     toast('Sauvegarde en ligne activée ✔'); routes.backup();

@@ -31,7 +31,16 @@ export async function decrypt(text, password) {
 }
 
 // ---------- stockage ----------
-function base(c) { return c.url.trim().replace(/\/+$/, ''); }
+// Accepte l'adresse sous toutes ses formes et garde seulement https://xxxx.supabase.co
+export function normalizeUrl(raw) {
+  let u = String(raw || '').trim().replace(/\s+/g, '');
+  if (!u) return '';
+  const dash = u.match(/supabase\.com\/dashboard\/project\/([a-z0-9]+)/i);
+  if (dash) return `https://${dash[1].toLowerCase()}.supabase.co`;
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try { return new URL(u).origin; } catch (e) { return u.replace(/\/+$/, ''); }
+}
+function base(c) { return normalizeUrl(c.url); }
 // Ancienne clé « anon » (JWT, commence par eyJ) : aussi en Authorization. Nouvelle clé « sb_publishable_… » : apikey seul.
 function headers(c, extra = {}) {
   const k = c.key.trim();
@@ -43,8 +52,10 @@ create policy "pressing_lecture" on storage.objects for select to anon using (bu
 async function check(res, what) {
   if (res.ok) return res;
   let msg = '';
-  try { const j = await res.json(); msg = j.message || j.error || ''; } catch (e) {}
-  if (res.status === 404 && /bucket/i.test(msg)) throw new Error(`Le dossier « ${BUCKET} » n’existe pas dans Supabase.`);
+  try { const t = await res.text(); try { const j = JSON.parse(t); msg = j.message || j.error || j.msg || t; } catch (e) { msg = t; } } catch (e) {}
+  msg = String(msg).slice(0, 120);
+  if (/bucket/i.test(msg)) throw new Error(`Le dossier « ${BUCKET} » est introuvable dans Supabase : vérifiez son nom dans Storage (tout en minuscules : ${BUCKET}).`);
+  if (res.status === 404) throw new Error(`Adresse du projet incorrecte (404). Elle doit ressembler à https://xxxx.supabase.co — ${msg}`);
   if (res.status === 400 || res.status === 403 || res.status === 401) throw new Error(`${what} refusé par le serveur (${msg || res.status}). Vérifiez la clé et les règles d’accès.`);
   throw new Error(`${what} impossible (${res.status} ${msg})`);
 }
