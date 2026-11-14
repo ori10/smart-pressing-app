@@ -139,8 +139,8 @@ export function bilanPdf(b, p, S) {
   const cats = Object.entries(b.expByCat).sort((a, c) => c[1] - a[1]);
   if (cats.length) table('Dépenses par catégorie', ['Catégorie', 'Type', 'Montant'], cats.map(([k, v]) => ({ cells: [catLabel(k), catInvest(k) ? 'Investissement' : 'Courante', m(v)] })), ['l', 'l', 'r']);
   if (b.topArticles.length) table('Articles les plus lavés', ['Article', 'Pièces'], b.topArticles.map(([n, c]) => ({ cells: [n, c] })), ['l', 'r']);
-  if (b.orderList.length) table(`Factures de la période (${b.orderList.length})`, ['N°', 'Date', 'Client', 'Statut', 'Total', 'Payé'],
-    b.orderList.map((o) => ({ cells: [o.number, fmtDate(o.createdAt, false), o.clientName, STATUS_LABEL[o.status], m(orderTotals(o).total), o.paid ? 'oui' : 'NON'] })), ['l', 'l', 'l', 'l', 'r', 'r']);
+  if (b.orderList.length) table(`Factures de la période (${b.orderList.length})`, ['N°', 'Date', 'Client', 'Statut', 'Total', 'Reste dû'],
+    b.orderList.map((o) => { const t = orderTotals(o); return { cells: [o.number, fmtDate(o.createdAt, false), o.clientName, STATUS_LABEL[o.status], m(t.total), t.due ? m(t.due) : '-'] }; }), ['l', 'l', 'l', 'l', 'r', 'r']);
   if (b.expenseList.length) table(`Dépenses de la période (${b.expenseList.length})`, ['Date', 'Catégorie', 'Détail', 'Montant'],
     b.expenseList.map((e) => ({ cells: [fmtDate(e.date, false), catLabel(e.category), e.label || '', m(e.amount)] })), ['l', 'l', 'l', 'r']);
 
@@ -198,9 +198,9 @@ export function bilanXlsx(b, p, S) {
     X.utils.book_append_sheet(wb, sheet([['Mois', "Chiffre d'affaires", 'Lavage cousin', 'Dépenses courantes', 'Bénéfice net', 'Investissements'],
       ...rows.map((r) => [r.label, r.ca, r.wash, r.exp, r.net, r.inv])], [18, 18, 15, 18, 15, 16], [1, 2, 3, 4, 5]), 'Par mois');
   }
-  X.utils.book_append_sheet(wb, sheet([['N°', 'Date', 'Client', 'Téléphone', 'Statut', 'Pièces', 'Kg', 'Total (F)', 'Lavage (F)', 'Marge (F)', 'Payé'],
-    ...b.orderList.map((o) => { const t = orderTotals(o); return [o.number, fmtDate(o.createdAt, false), o.clientName, o.clientPhone || '', STATUS_LABEL[o.status], t.pieces, Math.round(t.washKg * 100) / 100, t.total, t.wash, t.margin, o.paid ? 'oui' : 'non']; })],
-    [6, 11, 22, 14, 14, 7, 6, 12, 11, 11, 6], [7, 8, 9]), 'Factures');
+  X.utils.book_append_sheet(wb, sheet([['N°', 'Date', 'Client', 'Téléphone', 'Statut', 'Pièces', 'Kg', 'Remise (F)', 'Total (F)', 'Payé (F)', 'Reste dû (F)', 'Lavage (F)', 'Marge (F)'],
+    ...b.orderList.map((o) => { const t = orderTotals(o); return [o.number, fmtDate(o.createdAt, false), o.clientName, o.clientPhone || '', STATUS_LABEL[o.status], t.pieces, Math.round(t.washKg * 100) / 100, t.discount, t.total, Math.min(t.paid, t.total), t.due, t.wash, t.margin]; })],
+    [6, 11, 22, 14, 14, 7, 6, 11, 12, 11, 12, 11, 11], [7, 8, 9, 10, 11, 12]), 'Factures');
   X.utils.book_append_sheet(wb, sheet([['Date', 'Catégorie', 'Type', 'Détail', 'Montant (F)'],
     ...b.expenseList.map((e) => [fmtDate(e.date, false), catLabel(e.category), catInvest(e.category) ? 'Investissement' : 'Courante', e.label || '', e.amount])],
     [11, 26, 14, 30, 13], [4]), 'Dépenses');

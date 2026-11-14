@@ -75,6 +75,7 @@ export async function invoicePdf(o, s) {
   doc.setFont('helvetica', 'normal'); doc.setTextColor(20);
   const rows = o.items.map((i) => [i.name, String(i.qty), m(i.price), m(i.qty * i.price)]);
   if (o.deliveryFee) rows.push(['Livraison', '1', m(o.deliveryFee), m(o.deliveryFee)]);
+  if (t.discount) rows.push([(o.discount && o.discount.label) || 'Remise', '', '', '- ' + m(t.discount)]);
   for (const r of rows) {
     if (y > 250) { doc.addPage(); y = 20; }
     const name = doc.splitTextToSize(r[0], cols[1] - cols[0] - 15);
@@ -99,13 +100,59 @@ export async function invoicePdf(o, s) {
   doc.setFont('helvetica', 'italic');
   doc.text(doc.splitTextToSize(`Arrêtée la présente facture à la somme de ${words} (${m(t.total)}) francs CFA.`, R - L), L, y);
   doc.setFont('helvetica', 'bold'); y += 12;
-  doc.setTextColor(...(o.paid ? [20, 133, 90] : [200, 90, 20]));
-  doc.text(o.paid ? 'PAYÉE' : 'NON PAYÉE', L, y);
+  doc.setTextColor(...(t.due <= 0 ? [20, 133, 90] : [200, 90, 20]));
+  doc.text(t.due <= 0 ? 'PAYÉE' : t.paid > 0 ? `ACOMPTE VERSÉ : ${m(t.paid)}  ·  RESTE À PAYER : ${m(t.due)}` : 'NON PAYÉE', L, y);
+  const due = o.dueAt || o.deliveryAt;
+  if (due) { doc.setFont('helvetica', 'normal'); doc.setTextColor(20); doc.text('À rendre le ' + fmtDate(due), L, y + 6); }
 
   // Pied de page
   doc.setTextColor(...GREY); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
   doc.text('Présentez cette facture pour le retrait de votre linge.', W / 2, 280, { align: 'center' });
   doc.text('Merci de votre confiance !', W / 2, 285, { align: 'center' });
+  return doc.output('blob');
+}
+
+// Ticket de caisse 58 mm (zone imprimable ~48 mm) pour imprimante thermique Bluetooth.
+export async function ticketPdf(o, s) {
+  const { jsPDF } = window.jspdf;
+  const t = orderTotals(o);
+  const W = 58, X = 4, RX = W - 4;
+  // hauteur calculée d'après le contenu
+  const lines = o.items.length + (o.deliveryFee ? 1 : 0) + (t.discount ? 1 : 0);
+  const H = 92 + lines * 8 + (t.paid > 0 && t.due > 0 ? 10 : 0) + (s.logo ? 20 : 0);
+  const doc = new jsPDF({ unit: 'mm', format: [W, H] });
+  let y = 5;
+  if (s.logo) {
+    const sz = await imgSize(s.logo);
+    if (sz) { const h = 16, w = Math.min(44, (sz.w / sz.h) * h); doc.addImage(s.logo, s.logo.startsWith('data:image/png') ? 'PNG' : 'JPEG', (W - w) / 2, y, w, h); y += h + 3; }
+  }
+  const center = (txt, size = 8, bold = false) => { doc.setFont('helvetica', bold ? 'bold' : 'normal'); doc.setFontSize(size); doc.text(txt, W / 2, y, { align: 'center' }); y += size * 0.45 + 1.2; };
+  const dash = () => { doc.setLineDashPattern([0.8, 0.8], 0); doc.setDrawColor(0); doc.line(X, y, RX, y); doc.setLineDashPattern([], 0); y += 3.5; };
+  const lr = (a, b, size = 8, bold = false) => { doc.setFont('helvetica', bold ? 'bold' : 'normal'); doc.setFontSize(size); const la = doc.splitTextToSize(a, 30); doc.text(la, X, y); doc.text(b, RX, y, { align: 'right' }); y += la.length * size * 0.42 + 1.6; };
+  doc.setTextColor(0);
+  center(s.name || 'Pressing', 11, true);
+  if (s.city) center(s.city, 7.5);
+  if (s.phone) center('Tél. ' + s.phone, 7.5);
+  y += 1; dash();
+  center(`FACTURE N°${o.number}`, 10, true);
+  center(fmtDate(o.createdAt), 7.5);
+  y += 1;
+  lr('Client', o.clientName, 8, true);
+  if (o.clientPhone) lr('Tél.', o.clientPhone, 7.5);
+  dash();
+  for (const i of o.items) lr(`${i.qty} x ${i.name}`, m(i.qty * i.price));
+  if (o.deliveryFee) lr('Livraison', m(o.deliveryFee));
+  if (t.discount) lr('Remise', '- ' + m(t.discount));
+  dash();
+  lr('TOTAL', m(t.total), 11, true);
+  if (t.paid > 0 && t.due > 0) { lr('Payé', m(t.paid)); lr('RESTE À PAYER', m(t.due), 9, true); }
+  else lr(t.due <= 0 ? 'Payée' : 'Non payée', '', 8, true);
+  lr(`${t.pieces} pièce(s)`, '', 7.5);
+  const due = o.dueAt || o.deliveryAt;
+  if (due) lr('À rendre le', fmtDate(due), 7.5);
+  dash();
+  center('Merci de votre confiance !', 8, true);
+  center('Présentez ce ticket au retrait.', 7);
   return doc.output('blob');
 }
 

@@ -16,6 +16,7 @@ export const EXPENSE_CATEGORIES = [
   { key: 'communication', label: 'Téléphone et internet', invest: false },
   { key: 'entretien', label: 'Entretien et réparations', invest: false },
   { key: 'taxes', label: 'Taxes et impôts', invest: false },
+  { key: 'dedommagement', label: 'Dédommagements clients', invest: false },
   { key: 'autres', label: 'Autres dépenses', invest: false },
   { key: 'investissement', label: 'Investissement (machine, fer…)', invest: true },
 ];
@@ -25,6 +26,7 @@ export const catInvest = (k) => !!(EXPENSE_CATEGORIES.find((c) => c.key === k) |
 const DEFAULT_SETTINGS = {
   name: 'Smart Pressing', city: '', phone: '', logo: '',
   cousinRate: 400, deliveryFee: 500, savingsPercent: 25, invoiceStart: 1, adminPin: '',
+  dueDays: 2, loyaltyEvery: 10, loyaltyType: 'percent', loyaltyValue: 20,
 };
 
 // ---------- formatage ----------
@@ -80,8 +82,152 @@ export function orderTotals(o) {
   const estKg = o.items.reduce((s, i) => s + (i.homeWash ? 0 : i.qty * i.weight), 0);
   const washKg = o.weighedKg != null && o.weighedKg !== '' ? Number(o.weighedKg) : estKg;
   const wash = Math.round(washKg * (o.cousinRate || 0));
-  const total = items + (o.deliveryFee || 0);
-  return { items, total, estKg, washKg, wash, margin: total - wash, pieces: o.pieces.length };
+  const discount = Math.min(items + (o.deliveryFee || 0), Math.round((o.discount && o.discount.amount) || 0));
+  const total = items + (o.deliveryFee || 0) - discount;
+  const paid = paidAmount(o, total);
+  return { items, discount, total, estKg, washKg, wash, margin: total - wash, pieces: o.pieces.length, paid, due: Math.max(0, total - paid) };
+}
+
+// ---------- paiements (acomptes, paiements partiels) ----------
+// Anciennes factures : pas de liste de paiements, seulement « paid » (tout ou rien).
+export function paidAmount(o, total) {
+  if (Array.isArray(o.payments)) return o.payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  if (total === undefined) {
+    const items = o.items.reduce((s, i) => s + i.qty * i.price, 0);
+    total = items + (o.deliveryFee || 0) - Math.round((o.discount && o.discount.amount) || 0);
+  }
+  return o.paid ? total : 0;
+}
+function ensurePayments(o) {
+  if (!Array.isArray(o.payments)) {
+    const t = orderTotals({ ...o, payments: [] }).total;
+    o.payments = o.paid ? [{ amount: t, at: o.createdAt, note: 'Paiement' }] : [];
+  }
+}
+export function syncPaid(o) {
+  const t = orderTotals(o);
+  o.paid = t.total > 0 ? t.paid >= t.total : true;
+}
+export async function addPayment(o, amount, note = '') {
+  amount = Math.round(Number(amount) || 0);
+  if (amount <= 0) throw new Error('Montant invalide.');
+  ensurePayments(o);
+  o.payments.push({ amount, at: nowIso(), note });
+  syncPaid(o);
+  o.events.push({ status: o.status, note: `Paiement reçu : ${money(amount)}`, at: nowIso() });
+  await saveOrder(o);
+}
+export async function clearPayments(o) {
+  o.payments = [];
+  syncPaid(o);
+  o.events.push({ status: o.status, note: 'Paiements annulés (marqué impayé)', at: nowIso() });
+  await saveOrder(o);
+}
+
+// ---------- délais ----------
+export const dueDate = (o) => o.dueAt || o.deliveryAt || null;
+// 'late' : date promise dépassée et pas encore prêt ; 'soon' : à rendre dans les 24 h.
+export function lateness(o) {
+  const d = dueDate(o);
+  if (!d || o.status >= STATUS.PRET) return null;
+  const now = nowIso().slice(0, 16);
+  if (d.slice(0, 16) < now) return 'late';
+  const t = new Date(Date.now() + 24 * 3600e3);
+  const lim = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}:${pad(t.getMinutes())}`;
+  return d.slice(0, 16) <= lim ? 'soon' : null;
+}
+export function defaultDue(days) {
+  const t = new Date(Date.now() + (Number(days) || 0) * 864e5);
+  return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T17:00`;
+}
+
+// ---------- clients ----------
+export function phoneKey(p) { const d = String(p || '').replace(/\D/g, ''); return d.length >= 8 ? d.slice(-8) : ''; }
+export function clientKey(o) { return phoneKey(o.clientPhone) ? 'tel:' + phoneKey(o.clientPhone) : 'nom:' + o.clientName.trim().toLowerCase(); }
+export function listClients(orders) {
+  const map = new Map();
+  for (const o of orders.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const k = clientKey(o);
+    const c = map.get(k) || { key: k, name: o.clientName, phone: o.clientPhone || '', orders: [], spent: 0, due: 0, pieces: 0, firstAt: o.createdAt, lastAt: o.createdAt };
+    const t = orderTotals(o);
+    c.orders.push(o); c.spent += t.total; c.due += t.due; c.pieces += t.pieces;
+    if (o.clientName.trim().length >= c.name.trim().length) c.name = o.clientName; if (o.clientPhone) c.phone = o.clientPhone; c.lastAt = o.createdAt;
+    map.set(k, c);
+  }
+  return [...map.values()];
+}
+export async function findClients(text) {
+  const t = String(text || '').trim().toLowerCase();
+  if (t.length < 2) return [];
+  const digits = t.replace(/\D/g, '');
+  return listClients(await db.all('orders'))
+    .filter((c) => c.name.toLowerCase().includes(t) || (digits.length >= 3 && c.phone.replace(/\D/g, '').includes(digits)))
+    .sort((a, b) => b.lastAt.localeCompare(a.lastAt)).slice(0, 5);
+}
+
+// ---------- fidélité ----------
+// Toutes les N commandes, la N-ième a droit à la récompense. previousCount = commandes déjà faites.
+export function loyaltyReward(s, previousCount, subtotal) {
+  const every = Number(s.loyaltyEvery) || 0;
+  if (every < 2 || (previousCount + 1) % every !== 0) return null;
+  const v = Number(s.loyaltyValue) || 0;
+  if (v <= 0) return null;
+  const amount = s.loyaltyType === 'amount' ? Math.min(v, subtotal) : Math.round(subtotal * Math.min(100, v) / 100);
+  const label = `Fidélité : ${previousCount + 1}e commande (${s.loyaltyType === 'amount' ? money(v) : v + ' %'})`;
+  return { amount, label };
+}
+export function loyaltyProgress(s, count) {
+  const every = Number(s.loyaltyEvery) || 0;
+  if (every < 2) return null;
+  const inCycle = count % every;
+  return { every, done: inCycle, left: every - 1 - inCycle };
+}
+
+// ---------- cousin ----------
+export function cousinSummary(orders, payments) {
+  const sent = orders.filter((o) => o.status >= STATUS.COUSIN && cousinPieces(o).length)
+    .map((o) => ({ o, kg: orderTotals(o).washKg, amount: orderTotals(o).wash, at: (o.events.find((e) => e.status === STATUS.COUSIN) || {}).at || o.createdAt }))
+    .sort((a, b) => b.at.localeCompare(a.at));
+  const owed = sent.reduce((s, r) => s + r.amount, 0);
+  const kgTotal = sent.reduce((s, r) => s + r.kg, 0);
+  const paid = (payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  return { sent, owed, kg: kgTotal, paid, left: owed - paid };
+}
+export async function getCousinPayments() { return (await db.kv('cousinPayments')) || []; }
+export async function addCousinPayment(amount, note, date) {
+  amount = Math.round(Number(amount) || 0);
+  if (amount <= 0) throw new Error('Montant invalide.');
+  const list = await getCousinPayments();
+  list.push({ id: Date.now(), date: date || todayIso(), amount, note: note || '' });
+  await db.kv('cousinPayments', list);
+}
+export async function deleteCousinPayment(id) {
+  await db.kv('cousinPayments', (await getCousinPayments()).filter((p) => p.id !== id));
+}
+
+// ---------- réclamations ----------
+export const CLAIM_TYPES = { abimee: 'Pièce abîmée', perdue: 'Pièce perdue', tache: 'Tache restée', retard: 'Retard', autre: 'Autre' };
+export async function addClaim(o, { type, pieceIndex, note }) {
+  o.claims = o.claims || [];
+  o.claims.push({ id: Date.now(), type, pieceIndex: pieceIndex || null, note: (note || '').trim(), status: 'open', createdAt: nowIso() });
+  o.events.push({ status: o.status, note: 'Réclamation : ' + (CLAIM_TYPES[type] || type), at: nowIso() });
+  await saveOrder(o);
+}
+export async function resolveClaim(o, id, { resolution, compensation }) {
+  const c = (o.claims || []).find((x) => x.id === id);
+  if (!c) return;
+  c.status = 'resolved'; c.resolvedAt = nowIso(); c.resolution = (resolution || '').trim();
+  c.compensation = Math.round(Number(compensation) || 0);
+  o.events.push({ status: o.status, note: 'Réclamation réglée' + (c.compensation ? ` (dédommagement ${money(c.compensation)})` : ''), at: nowIso() });
+  await saveOrder(o);
+  if (c.compensation > 0) {
+    await db.put('expenses', { date: todayIso(), amount: c.compensation, category: 'dedommagement', label: `N°${o.number} ${o.clientName} : ${CLAIM_TYPES[c.type] || ''}`, createdAt: nowIso() });
+  }
+}
+export async function openClaims() {
+  const out = [];
+  for (const o of await db.all('orders')) for (const c of o.claims || []) if (c.status === 'open') out.push({ o, c });
+  return out.sort((a, b) => a.c.createdAt.localeCompare(b.c.createdAt));
 }
 
 export function itemsSummary(o) {
@@ -96,7 +242,7 @@ export async function nextNumber() {
   return Math.max(max + 1, Number(s.invoiceStart) || 1);
 }
 
-export async function createOrder({ clientName, clientPhone, quantities, weighedKg, delivery, deliveryPlace, deliveryAt }) {
+export async function createOrder({ clientName, clientPhone, quantities, weighedKg, delivery, deliveryPlace, deliveryAt, dueAt, discount, deposit }) {
   const s = await getSettings();
   const arts = await getArticles();
   const items = [];
@@ -118,9 +264,17 @@ export async function createOrder({ clientName, clientPhone, quantities, weighed
     deliveryPlace: delivery ? (deliveryPlace || '').trim() : '',
     deliveryAt: delivery && deliveryAt ? deliveryAt : null,
     cousinRate: Number(s.cousinRate) || 0,
-    paid: false, note: '', items, pieces,
+    dueAt: dueAt || (delivery && deliveryAt ? deliveryAt : null),
+    discount: discount && discount.amount > 0 ? { amount: Math.round(discount.amount), label: discount.label || 'Remise' } : null,
+    paid: false, note: '', items, pieces, payments: [], claims: [],
     events: [{ status: STATUS.RECU, note: 'Facture émise', at: nowIso() }],
   };
+  const dep = Math.round(Number(deposit) || 0);
+  if (dep > 0) {
+    const tot = orderTotals(order).total;
+    order.payments.push({ amount: Math.min(dep, tot), at: nowIso(), note: dep >= tot ? 'Payé à la remise' : 'Acompte' });
+    syncPaid(order);
+  }
   await db.put('orders', order);
   return order;
 }
@@ -252,12 +406,15 @@ export function resizeImage(file, max = 900, quality = 0.75) {
 // ---------- compteurs d'accueil ----------
 export async function counts() {
   const orders = await db.all('orders');
-  const c = { byStatus: [0, 0, 0, 0, 0, 0], open: 0, todayCount: 0, todayCA: 0, unpaid: 0 };
+  const c = { byStatus: [0, 0, 0, 0, 0, 0], open: 0, todayCount: 0, todayCA: 0, unpaid: 0, late: [], soon: [], claims: 0 };
   const today = todayIso();
   for (const o of orders) {
     c.byStatus[o.status]++;
     if (o.status !== STATUS.LIVRE) c.open++;
     if (o.createdAt.slice(0, 10) === today) { c.todayCount++; c.todayCA += orderTotals(o).total; }
+    const l = lateness(o);
+    if (l === 'late') c.late.push(o); else if (l === 'soon') c.soon.push(o);
+    c.claims += (o.claims || []).filter((x) => x.status === 'open').length;
   }
   return c;
 }
@@ -320,7 +477,7 @@ export function computeBilan(orders, expenses, p, settings) {
   for (const o of os) {
     const t = orderTotals(o);
     r.ca += t.total; r.washKg += t.washKg; r.wash += t.wash;
-    if (o.paid) r.cashed += t.total; else r.unpaid += t.total;
+    r.cashed += Math.min(t.paid, t.total); r.unpaid += t.due;
     for (const i of o.items) r.articles[i.name] = (r.articles[i.name] || 0) + i.qty;
     const day = o.createdAt.slice(0, 10), mon = o.createdAt.slice(0, 7);
     r.byDay[day] = (r.byDay[day] || 0) + t.total;
@@ -360,6 +517,7 @@ export async function exportAll() {
     app: 'smart-pressing', version: 1, exportedAt: nowIso(),
     settings: await db.kv('settings'), articles: await db.all('articles'),
     orders: await db.all('orders'), expenses: await db.all('expenses'), photos,
+    cousinPayments: (await db.kv('cousinPayments')) || [],
   };
 }
 
@@ -371,6 +529,7 @@ export async function importAll(data) {
   for (const o of data.orders || []) await db.put('orders', o);
   for (const e of data.expenses || []) await db.put('expenses', e);
   for (const [k, v] of Object.entries(data.photos || {})) await db.put('photos', v, k);
+  await db.kv('cousinPayments', data.cousinPayments || []);
   await db.kv('initialized', nowIso());
 }
 

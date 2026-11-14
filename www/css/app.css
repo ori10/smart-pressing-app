@@ -233,3 +233,28 @@ svg.chart .ax { font-size: 9.5px; fill: #667385; font-family: inherit; }
 .calc .l span:last-child { white-space: nowrap; }
 body.white, body.white main { background: #fff; }
 .login .login-hello { margin-top: 6px; }
+
+/* nouveautés : retards, clients, fidélité, WhatsApp */
+.edge.late { border-left-color: var(--red); }
+.tile.red { border-top-color: var(--red); } .tile.red b { color: var(--red); }
+.late-row { display: flex; justify-content: space-between; gap: 8px; padding: 8px 0 0; font-size: .88rem; color: var(--ink); text-decoration: none; }
+.late-row span:last-child { color: var(--muted); white-space: nowrap; }
+.btn.wa { background: #1fa855; color: #fff; }
+.sugg { margin-top: 8px; border: 1.5px solid var(--line); border-radius: 12px; overflow: hidden; }
+.sugg button { display: block; width: 100%; text-align: left; background: #fff; border: 0; border-bottom: 1px solid var(--line); padding: 11px 12px; font-size: .92rem; }
+.sugg button:last-child { border-bottom: 0; }
+.client-chip { display: block; margin-top: 10px; background: var(--soft-green); color: var(--green); border-radius: 12px; padding: 10px 12px; font-size: .88rem; text-decoration: none; line-height: 1.5; }
+.loyal { background: var(--soft-orange); border-radius: 12px; padding: 4px 10px; color: #8a4500; }
+.client-row { display: flex; align-items: center; gap: 12px; text-decoration: none; color: var(--ink); }
+.client-row .rank { width: 30px; height: 30px; border-radius: 50%; background: var(--soft-blue); color: var(--navy); display: grid; place-items: center; font-weight: 800; font-size: .85rem; flex: none; }
+.dots { display: flex; gap: 6px; flex-wrap: wrap; }
+.dots i { width: 22px; height: 22px; border-radius: 50%; background: var(--line); }
+.dots i.on { background: var(--orange); }
+.dots i.gift { background: none; border: 2px dashed var(--orange); position: relative; }
+.dots i.gift::after { content: '🎁'; position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; font-style: normal; }
+.calc a.l:active { background: var(--bg); }
+
+.guide summary { font-weight: 700; color: var(--blue); cursor: pointer; padding: 6px 0; }
+.guide ol { padding-left: 20px; margin: 8px 0; font-size: .9rem; line-height: 1.5; }
+.guide li { margin-bottom: 8px; }
+.guide code { background: var(--soft-blue); padding: 1px 6px; border-radius: 6px; }

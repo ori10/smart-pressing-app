@@ -1,9 +1,10 @@
 import { db } from './db.js';
 import { SEED } from './seed.js';
 import * as L from './logic.js';
-import { invoicePdf } from './pdf.js';
+import { invoicePdf, ticketPdf } from './pdf.js';
 import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
 import * as Charts from './charts.js';
+import * as Cloud from './cloud.js';
 import { shareFile, saveFile, openExternal, waNumber, isNative } from './native.js';
 import { beep } from './scan.js';
 
@@ -98,15 +99,26 @@ async function busy(btn, fn) {
 function fileSafe(s) { return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
 
 // ---------------------------------------------------------------- carte de commande (liste)
+function lateBadge(o) {
+  const l = L.lateness(o);
+  if (l === 'late') return `<span class="badge red">⏰ En retard</span>`;
+  if (l === 'soon') return `<span class="badge orange">⏰ ${fmtShort(L.dueDate(o))}</span>`;
+  return '';
+}
+function payBadge(t) {
+  if (t.due <= 0) return '';
+  return t.paid > 0 ? ` <span class="badge orange">reste ${money(t.due)}</span>` : ' <span class="badge red">impayé</span>';
+}
 function orderCard(o, { showAction = true } = {}) {
   const t = orderTotals(o);
   const act = L.nextAction(o);
-  return `<div class="card edge ${STATUS_TONE[o.status]}">
+  const late = L.lateness(o) === 'late';
+  return `<div class="card edge ${late ? 'late' : STATUS_TONE[o.status]}">
     <div class="row between"><a href="#/order/${o.number}" style="text-decoration:none;color:inherit" class="grow"><b>N°${o.number} · ${esc(o.clientName)}</b></a>${badge(o)}</div>
     ${steps(o)}
     <div class="small muted">${esc(L.itemsSummary(o))}</div>
-    <div class="row between" style="margin-top:6px"><span class="small">${t.pieces} pièce(s)${o.deliveryAt ? ' · livraison ' + fmtShort(o.deliveryAt) : ''}</span>
-      <b>${money(t.total)}${o.paid ? '' : ' <span class="badge red">impayé</span>'}</b></div>
+    <div class="row between" style="margin-top:6px;flex-wrap:wrap;gap:6px"><span class="small">${t.pieces} pièce(s) ${lateBadge(o)}</span>
+      <b>${money(t.total)}${payBadge(t)}</b></div>
     ${showAction ? `<div class="btns" style="margin-top:10px">
       ${act ? `<button class="btn primary sm" data-act="${o.number}">${esc(act.label)}</button>` : '<span></span>'}
       <a class="btn sm" href="#/order/${o.number}">Facture</a></div>` : ''}
@@ -127,23 +139,34 @@ async function runAction(number, after) {
 
 async function deliverFlow(o, cashedChecked = null) {
   const t = orderTotals(o);
-  let paid = o.paid;
-  if (!o.paid) {
+  let cash = t.due <= 0;
+  if (t.due > 0) {
     if (cashedChecked === null) {
       const m = await ask({
         title: `Livrer la commande N°${o.number} ?`, ok: 'Livré',
-        body: `<p>Montant : <b>${money(t.total)}</b></p><label class="check"><input type="checkbox" id="m-paid"> Argent encaissé</label>`,
+        body: `<p>Total ${money(t.total)}${t.paid ? ` · déjà payé ${money(t.paid)}` : ''}<br>Reste à encaisser : <b>${money(t.due)}</b></p>
+          <label class="check"><input type="checkbox" id="m-paid"> ${money(t.due)} encaissés</label>`,
       });
       if (!m) return false;
-      paid = $('#m-paid', m).checked;
-    } else paid = cashedChecked;
-    if (!paid && !(await ask({ title: 'Pas encore payé ?', text: 'La commande sera livrée mais restera dans les impayés.', ok: 'Livrer quand même' }))) return false;
+      cash = $('#m-paid', m).checked;
+    } else cash = cashedChecked;
+    if (!cash && !(await ask({ title: 'Pas encore payé ?', text: `La commande sera livrée mais ${money(t.due)} resteront dans les impayés.`, ok: 'Livrer quand même' }))) return false;
+    if (cash) await L.addPayment(o, t.due, 'À la livraison');
   }
-  o.paid = paid;
-  await L.advance(o, STATUS.LIVRE, paid ? '' : 'Livré non payé');
+  await L.advance(o, STATUS.LIVRE, cash ? '' : 'Livré non soldé');
   toast(`N°${o.number} livrée`);
   return true;
 }
+
+// Message « linge prêt » en un toucher.
+function waReady(o) {
+  const t = orderTotals(o);
+  let msg = `Bonjour ${o.clientName}, votre linge est prêt chez ${S.name} (facture N°${o.number}, ${t.pieces} pièce(s)).`;
+  msg += t.due > 0 ? ` Reste à payer : ${money(t.due)}.` : ' Tout est déjà réglé.';
+  msg += o.deliveryFee || o.deliveryPlace ? ' Nous vous le livrons comme prévu.' : ' Vous pouvez passer le récupérer.';
+  return msg + ' Merci !';
+}
+function openWa(o, text) { openExternal(`https://wa.me/${waNumber(o.clientPhone)}?text=${encodeURIComponent(text)}`); }
 
 // ---------------------------------------------------------------- écrans
 const routes = {};
@@ -158,7 +181,8 @@ routes.welcome = async () => {
       <button class="btn primary big block" id="w-hist">Reprendre mes données</button>
       <p class="small muted" style="margin:0">Réglages et grille de ${SEED.articles.length} articles${SEED.orders.length ? ` + les factures déjà émises (N°${SEED.orders.map((o) => o.number).join(', N°')})` : ''}.</p>
       <button class="btn ghost block" id="w-empty">Démarrer avec seulement la grille de prix</button>
-      <label class="btn ghost block">Restaurer une sauvegarde…<input type="file" accept=".json,application/json,text/plain" id="w-file" hidden></label>
+      <label class="btn ghost block">Restaurer une sauvegarde (fichier)…<input type="file" accept=".json,application/json,text/plain" id="w-file" hidden></label>
+      <a class="btn ghost block" href="#/cloud">☁️ Restaurer depuis internet</a>
     </div>`);
   $('#w-hist', v).onclick = async () => { await L.initialize(true); location.hash = '#/home'; boot(); };
   $('#w-empty', v).onclick = async () => { await L.initialize(false); location.hash = '#/home'; boot(); };
@@ -194,7 +218,12 @@ routes.home = async () => {
   const last = await db.kv('lastBackup');
   const total = await db.count('orders');
   let backupNote = '';
-  if (total > 0) {
+  const cloudCfg = await Cloud.getCloud();
+  const cloudOkAt = await db.kv('cloudLastOk');
+  if (cloudCfg.enabled) {
+    const h = cloudOkAt ? (Date.now() - new Date(cloudOkAt).getTime()) / 3600e3 : 999;
+    if (h > 48) backupNote = `<a href="#/backup" class="note" style="display:block;text-decoration:none;margin-bottom:12px">⚠️ La sauvegarde en ligne n'est pas passée depuis ${cloudOkAt ? Math.floor(h / 24) + ' jours' : 'son activation'}. Ouvrez l'appli avec internet ou vérifiez la configuration.</a>`;
+  } else if (total > 0) {
     const days = last ? Math.floor((Date.now() - new Date(last).getTime()) / 864e5) : null;
     if (days === null || days >= 7) backupNote = `<a href="#/backup" class="note" style="display:block;text-decoration:none;margin-bottom:12px">⚠️ ${days === null ? 'Aucune sauvegarde faite.' : `Dernière sauvegarde il y a ${days} jours.`} Toutes les données sont dans ce téléphone : faites une sauvegarde.</a>`;
   }
@@ -204,6 +233,8 @@ routes.home = async () => {
     <p class="muted" style="margin:4px 0 14px">${fmtDate(L.todayIso(), false)} · ${c.open} commande(s) en cours</p>
     ${backupNote}
     <a class="btn primary big block" href="#/new" style="margin-bottom:14px">+ Nouvelle facture</a>
+    ${c.late.length ? `<div class="card edge late"><b style="color:var(--red)">⏰ ${c.late.length} commande(s) en retard</b>${c.late.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)}</span><span>promis ${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
+    ${c.soon.length ? `<div class="card edge orange"><b style="color:#a65200">À rendre dans les 24 h : ${c.soon.length}</b>${c.soon.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)} · ${STATUS_LABEL[o.status]}</span><span>${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
     <div class="tiles">
       <a class="tile orange" href="#/orders?s=0"><b>${c.byStatus[0]}</b><span>À envoyer au cousin</span></a>
       <a class="tile blue" href="#/orders?s=1"><b>${c.byStatus[1]}</b><span>Chez le cousin</span></a>
@@ -211,48 +242,98 @@ routes.home = async () => {
       <a class="tile orange" href="#/orders?s=3"><b>${c.byStatus[3]}</b><span>À vérifier</span></a>
       <a class="tile green" href="#/deliveries"><b>${c.byStatus[4]}</b><span>Prêtes</span></a>
       <a class="tile navy" href="#/orders?s=today"><b>${c.todayCount}</b><span>Factures du jour</span></a>
+      ${c.claims ? `<a class="tile red wide" href="#/claims"><b>${c.claims}</b><span>Réclamation(s) à régler</span></a>` : ''}
       ${isAdmin() ? `<a class="tile navy wide" href="#/bilan"><b>${money(c.todayCA)}</b><span>Chiffre d'affaires du jour</span></a>` : ''}
     </div>`);
 };
 
-routes.new = async () => {
+routes.new = async (_, q) => {
   setNav('plus');
   const number = await L.nextNumber();
   setTop({ title: 'Nouvelle facture', right: `<span class="pill">N°${number}</span>` });
   const arts = await L.getArticles(true);
+  const allOrders = await db.all('orders');
   const qty = {};
+  let client = null;          // client reconnu (fiche)
+  let loyaltyOn = true;
   const v = view(`<div class="card">
       <div class="grid2">
-        <div><label class="f">Nom du client</label><input class="i" id="n-name" autocomplete="off" autocapitalize="words"></div>
-        <div><label class="f">Téléphone</label><input class="i" id="n-phone" type="tel" inputmode="tel"></div>
-      </div></div>
+        <div><label class="f">Nom du client</label><input class="i" id="n-name" autocomplete="off" autocapitalize="words" value="${esc(q.get('name') || '')}"></div>
+        <div><label class="f">Téléphone</label><input class="i" id="n-phone" type="tel" inputmode="tel" autocomplete="off" value="${esc(q.get('phone') || '')}"></div>
+      </div>
+      <div id="n-sugg"></div>
+      <div id="n-client"></div></div>
     <div class="card" id="n-arts">${arts.map((a) => `<div class="art" data-id="${a.id}">
         <div class="name">${esc(a.name)}<div class="price">${money(a.price)}${a.homeWash ? ' · lavage maison' : ''}</div></div>
         <div class="qty"><button class="minus" data-d="-1">−</button><output>0</output><button class="plus" data-d="1">+</button></div></div>`).join('') || '<div class="empty">Aucun article actif : ajoutez-en dans Réglages.</div>'}</div>
     <div class="card stack">
+      <div><label class="f">À rendre le</label><input class="i" id="n-due" type="datetime-local" value="${L.defaultDue(S.dueDays)}"></div>
       <div><label class="f">Poids pesé (kg) — facultatif</label><input class="i" id="n-kg" type="number" inputmode="decimal" step="0.1" min="0" placeholder="estimé : 0 kg"></div>
       <label class="check"><input type="checkbox" id="n-deliv"> Livraison (+${money(S.deliveryFee)})</label>
       <div id="n-dbox" class="hidden stack">
         <div><label class="f">Lieu de livraison</label><input class="i" id="n-place"></div>
-        <div><label class="f">Date et heure</label><input class="i" id="n-at" type="datetime-local"></div>
+        <div><label class="f">Date et heure de livraison</label><input class="i" id="n-at" type="datetime-local"></div>
       </div>
+      <div id="n-loyal"></div>
+      <div class="grid2">
+        <div><label class="f">Remise (F) — facultatif</label><input class="i" id="n-disc" type="number" inputmode="numeric" min="0" placeholder="0"></div>
+        <div><label class="f">Payé maintenant (F)</label><input class="i" id="n-dep" type="number" inputmode="numeric" min="0" placeholder="0 = rien"></div>
+      </div>
+      <div class="row" style="gap:6px"><button class="btn sm ghost" id="n-full" type="button">Tout payé</button><span class="small muted" id="n-rest"></span></div>
     </div>
     <div class="totalbar">
       <div class="row between"><span>Total client</span><span class="big" id="n-total">0 F</span></div>
       <div class="small" id="n-admin" style="opacity:.85"></div>
       <button class="btn primary big block" id="n-go" style="margin-top:10px">Émettre la facture</button>
     </div>`);
-  const recalc = () => {
+  const sums = () => {
     let items = 0, est = 0, n = 0;
-    for (const a of arts) { const q = qty[a.id] || 0; items += q * a.price; if (!a.homeWash) est += q * a.weight; n += q; }
+    for (const a of arts) { const q2 = qty[a.id] || 0; items += q2 * a.price; if (!a.homeWash) est += q2 * a.weight; n += q2; }
     const deliv = $('#n-deliv', v).checked ? Number(S.deliveryFee) || 0 : 0;
-    const kgv = $('#n-kg', v).value;
-    const washKg = kgv !== '' ? Number(kgv) : est;
-    const wash = Math.round(washKg * S.cousinRate);
-    $('#n-kg', v).placeholder = `estimé : ${L.kg(est)}`;
-    $('#n-total', v).textContent = money(items + deliv);
-    $('#n-admin', v).textContent = (n ? `${n} pièce(s)` : '') + (isAdmin() && n ? ` · Lavage ${money(wash)} · marge ${money(items + deliv - wash)}` : '');
+    const reward = client ? L.loyaltyReward(S, client.orders.length, items) : (null);
+    const loyal = reward && loyaltyOn ? reward.amount : 0;
+    const manual = Math.max(0, Math.round(Number($('#n-disc', v).value) || 0));
+    const discount = Math.min(items + deliv, loyal + manual);
+    return { items, est, n, deliv, reward, loyal, manual, discount, total: items + deliv - discount };
   };
+  const recalc = () => {
+    const s = sums();
+    const kgv = $('#n-kg', v).value;
+    const washKg = kgv !== '' ? Number(kgv) : s.est;
+    const wash = Math.round(washKg * S.cousinRate);
+    $('#n-kg', v).placeholder = `estimé : ${L.kg(s.est)}`;
+    $('#n-total', v).textContent = money(s.total);
+    $('#n-admin', v).textContent = (s.n ? `${s.n} pièce(s)` : '') + (s.discount ? ` · remise ${money(s.discount)}` : '') + (isAdmin() && s.n ? ` · Lavage ${money(wash)} · marge ${money(s.total - wash)}` : '');
+    $('#n-loyal', v).innerHTML = s.reward ? `<label class="check loyal"><input type="checkbox" id="n-loyal-on" ${loyaltyOn ? 'checked' : ''}> 🎁 ${esc(s.reward.label)} : −${money(s.reward.amount)}</label>` : '';
+    if ($('#n-loyal-on', v)) $('#n-loyal-on', v).onchange = (e) => { loyaltyOn = e.target.checked; recalc(); };
+    const dep = Math.round(Number($('#n-dep', v).value) || 0);
+    $('#n-rest', v).textContent = s.total ? (dep >= s.total ? 'Facture soldée' : dep > 0 ? `Reste à payer : ${money(s.total - dep)}` : 'Rien payé pour l’instant') : '';
+  };
+  const showClient = () => {
+    const box = $('#n-client', v);
+    if (!client) { box.innerHTML = ''; return; }
+    const lp = L.loyaltyProgress(S, client.orders.length);
+    box.innerHTML = `<a class="client-chip" href="#/client/${encodeURIComponent(client.key)}">
+      <b>★ Client connu : ${client.orders.length} commande(s)</b> · ${money(client.spent)} dépensés${client.due > 0 ? ` · <span style="color:var(--red)">doit ${money(client.due)}</span>` : ''}
+      ${lp ? `<br><span class="small">Fidélité : ${lp.left === 0 ? 'cette commande est récompensée 🎁' : `récompense dans ${lp.left + 1} commande(s)`}</span>` : ''}</a>`;
+  };
+  const matchClient = () => {
+    const name = $('#n-name', v).value.trim().toLowerCase(), phone = L.phoneKey($('#n-phone', v).value);
+    const list = L.listClients(allOrders);
+    client = (phone && list.find((c) => c.key === 'tel:' + phone)) || (!phone && name && list.find((c) => c.key === 'nom:' + name)) || null;
+    showClient(); recalc();
+  };
+  const suggest = async (text) => {
+    const box = $('#n-sugg', v);
+    const found = await L.findClients(text);
+    box.innerHTML = found.length ? `<div class="sugg">${found.map((c, i) => `<button type="button" data-i="${i}"><b>${esc(c.name)}</b> <span class="muted">${esc(c.phone)} · ${c.orders.length} cmd</span></button>`).join('')}</div>` : '';
+    $$('[data-i]', box).forEach((b) => { b.onclick = () => {
+      const c = found[Number(b.dataset.i)];
+      $('#n-name', v).value = c.name; $('#n-phone', v).value = c.phone; box.innerHTML = ''; matchClient();
+    }; });
+  };
+  $('#n-name', v).oninput = (e) => { suggest(e.target.value); matchClient(); };
+  $('#n-phone', v).oninput = (e) => { suggest(e.target.value); matchClient(); };
   $('#n-arts', v).addEventListener('click', (e) => {
     const b = e.target.closest('button[data-d]'); if (!b) return;
     const row = b.closest('.art'); const id = Number(row.dataset.id);
@@ -261,17 +342,26 @@ routes.new = async () => {
     row.classList.toggle('on', qty[id] > 0);
     recalc();
   });
-  $('#n-kg', v).oninput = recalc;
+  ['#n-kg', '#n-disc', '#n-dep'].forEach((id) => { $(id, v).oninput = recalc; });
+  $('#n-full', v).onclick = () => { $('#n-dep', v).value = sums().total; recalc(); };
   $('#n-deliv', v).onchange = () => { $('#n-dbox', v).classList.toggle('hidden', !$('#n-deliv', v).checked); recalc(); };
+  $('#n-at', v).onchange = () => { if ($('#n-at', v).value) $('#n-due', v).value = $('#n-at', v).value; };
   $('#n-go', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const s = sums();
+    const labels = [];
+    if (s.loyal) labels.push(s.reward.label);
+    if (s.manual) labels.push('Remise');
     const o = await L.createOrder({
       clientName: $('#n-name', v).value, clientPhone: $('#n-phone', v).value, quantities: qty,
       weighedKg: $('#n-kg', v).value, delivery: $('#n-deliv', v).checked,
-      deliveryPlace: $('#n-place', v).value, deliveryAt: $('#n-at', v).value,
+      deliveryPlace: $('#n-place', v).value, deliveryAt: $('#n-at', v).value, dueAt: $('#n-due', v).value,
+      discount: s.discount ? { amount: s.discount, label: labels.join(' + ') } : null,
+      deposit: $('#n-dep', v).value,
     });
     toast(`Facture N°${o.number} émise`);
     location.hash = `#/order/${o.number}`;
   });
+  if (q.get('name') || q.get('phone')) matchClient();
   recalc();
 };
 
@@ -284,27 +374,40 @@ routes.order = async (number) => {
   const act = L.nextAction(o);
   const photos = {};
   for (const p of o.pieces) photos[p.index] = await L.getPhoto(pieceCode(o.number, p.index));
+  const claims = o.claims || [];
+  const ready = o.status === STATUS.PRET && o.clientPhone;
+  const due = L.dueDate(o);
   const v = view(`
+    ${ready ? `<button class="btn wa big block" id="o-ready" style="margin-bottom:10px">📲 Prévenir : « votre linge est prêt »</button>` : ''}
     ${act ? `<button class="btn primary big block" id="o-act" style="margin-bottom:12px">${esc(act.label)}</button>` : ''}
+    ${L.lateness(o) === 'late' ? `<div class="alert" style="margin-bottom:12px">⏰ En retard : promis pour le ${fmtShort(due)}.</div>` : ''}
     <div class="card">
-      <div class="row between"><div><b style="font-size:1.1rem">${esc(o.clientName)}</b>
+      <div class="row between"><div><a href="#/client/${encodeURIComponent(L.clientKey(o))}" style="color:inherit;text-decoration:none"><b style="font-size:1.1rem">${esc(o.clientName)} ›</b></a>
         <div class="small muted">${o.clientPhone ? `<a href="tel:${esc(o.clientPhone)}">${esc(o.clientPhone)}</a> · ` : ''}${fmtDate(o.createdAt)}</div></div>
-        <span class="badge ${o.paid ? 'green' : 'red'}">${o.paid ? 'Payé' : 'Impayé'}</span></div>
+        <span class="badge ${t.due <= 0 ? 'green' : t.paid ? 'orange' : 'red'}">${t.due <= 0 ? 'Payé' : t.paid ? 'Acompte' : 'Impayé'}</span></div>
       ${steps(o)}
       <div class="inv-lines">
         ${o.items.map((i) => `<div class="l"><span>${i.qty} × ${esc(i.name)}</span><span>${money(i.qty * i.price)}</span></div>`).join('')}
         ${o.deliveryFee ? `<div class="l"><span>Livraison</span><span>${money(o.deliveryFee)}</span></div>` : ''}
+        ${t.discount ? `<div class="l"><span>${esc((o.discount && o.discount.label) || 'Remise')}</span><span>− ${money(t.discount)}</span></div>` : ''}
         <div class="l total"><span>Total</span><span>${money(t.total)}</span></div>
+        ${t.paid > 0 && t.due > 0 ? `<div class="l"><span>Déjà payé</span><span>${money(t.paid)}</span></div><div class="l total" style="color:var(--red)"><span>Reste à payer</span><span>${money(t.due)}</span></div>` : ''}
       </div>
-      ${o.deliveryPlace || o.deliveryAt ? `<p class="small" style="margin:6px 0 0">🚚 ${esc(o.deliveryPlace || 'Lieu à préciser')}${o.deliveryAt ? ' · ' + fmtShort(o.deliveryAt) : ''}</p>` : ''}
+      ${due ? `<p class="small" style="margin:6px 0 0">⏰ À rendre le ${fmtShort(due)}</p>` : ''}
+      ${o.deliveryPlace || o.deliveryAt ? `<p class="small" style="margin:4px 0 0">🚚 ${esc(o.deliveryPlace || 'Lieu à préciser')}${o.deliveryAt ? ' · ' + fmtShort(o.deliveryAt) : ''}</p>` : ''}
     </div>
     ${o.note ? `<div class="note" style="margin-bottom:12px">Remarque : ${esc(o.note)}</div>` : ''}
     <div class="btns" style="margin-bottom:12px">
+      ${t.due > 0 ? `<button class="btn green" id="o-pay">Encaisser</button>` : ''}
       <button class="btn navy" id="o-share">Envoyer le PDF</button>
+      <button class="btn" id="o-ticket">🧾 Ticket 58 mm</button>
       <button class="btn" id="o-dl">Télécharger</button>
-      <button class="btn ${o.paid ? 'ghost' : 'green'}" id="o-paid">${o.paid ? 'Marquer impayé' : 'Marquer payé'}</button>
       ${o.clientPhone ? `<button class="btn" id="o-wa">WhatsApp</button>` : ''}
+      <button class="btn" id="o-claim">⚠️ Réclamation</button>
     </div>
+    ${(o.payments || []).length ? `<div class="card"><h2 style="margin-top:0">Paiements</h2><div class="calc">${o.payments.map((p) => `<div class="l"><span>${fmtDate(p.at)}${p.note ? ' · ' + esc(p.note) : ''}</span><span>${money(p.amount)}</span></div>`).join('')}</div>
+      ${isAdmin() ? `<button class="btn sm ghost" id="o-unpay" style="margin-top:8px">Annuler les paiements</button>` : ''}</div>` : ''}
+    ${claims.length ? `<h2>Réclamations</h2>${claims.map((c) => claimCard(o, c)).join('')}` : ''}
     ${isAdmin() ? `<div class="card"><h2 style="margin-top:0">Coûts (admin)</h2>
       <div class="calc"><div class="l"><span>Poids ${o.weighedKg != null ? 'pesé' : 'estimé'}</span><span>${L.kg(t.washKg)}</span></div>
       <div class="l"><span>Lavage cousin (${money(o.cousinRate)}/kg)</span><span>− ${money(t.wash)}</span></div>
@@ -313,7 +416,7 @@ routes.order = async (number) => {
     </div>` : ''}
     <h2>Photos des pièces</h2>
     <div class="card">${o.pieces.map((p) => {
-      const code = pieceCode(o.number, p.index); const ph = photos[p.index];
+      const ph = photos[p.index];
       return `<div class="piece">${ph ? `<img class="thumb" src="${ph}" data-full="${p.index}">` : '<div class="thumb">—</div>'}
         <div class="grow"><b>${esc(p.name)}</b><div class="small muted">Pièce ${p.index}/${o.pieces.length}${p.homeWash ? ' · maison' : ''}</div></div>
         <label class="btn sm">${ph ? 'Refaire' : 'Photo'}<input type="file" accept="image/*" capture="environment" data-photo="${p.index}" hidden></label></div>`;
@@ -324,22 +427,34 @@ routes.order = async (number) => {
   `);
   const reload = () => routes.order(number);
   if (act) $('#o-act', v).onclick = (e) => busy(e.currentTarget, () => runAction(o.number, reload));
+  if ($('#o-ready', v)) $('#o-ready', v).onclick = () => openWa(o, waReady(o));
   const pdfName = `Facture-${o.number}-${fileSafe(o.clientName)}.pdf`;
   $('#o-share', v).onclick = (e) => busy(e.currentTarget, async () => {
     const blob = await invoicePdf(o, S);
     const r = await shareFile(blob, pdfName, `Facture N°${o.number}`);
-    if (r === 'downloaded' && o.clientPhone) openExternal(`https://wa.me/${waNumber(o.clientPhone)}?text=${encodeURIComponent(waText(o))}`);
+    if (r === 'downloaded' && o.clientPhone) openWa(o, waText(o));
+  });
+  $('#o-ticket', v).onclick = (e) => busy(e.currentTarget, async () => {
+    await shareFile(await ticketPdf(o, S), `Ticket-${o.number}.pdf`, `Ticket N°${o.number}`);
   });
   $('#o-dl', v).onclick = (e) => busy(e.currentTarget, async () => {
     const where = await saveFile(await invoicePdf(o, S), pdfName);
     if (where) toast('Enregistré : ' + where);
   });
-  $('#o-paid', v).onclick = async () => {
-    o.paid = !o.paid;
-    o.events.push({ status: o.status, note: o.paid ? 'Paiement reçu' : 'Marqué impayé', at: L.nowIso() });
-    await L.saveOrder(o); toast(o.paid ? 'Marqué payé' : 'Marqué impayé'); reload();
+  if ($('#o-pay', v)) $('#o-pay', v).onclick = async () => {
+    const m = await ask({ title: 'Encaisser', ok: 'Enregistrer',
+      body: `<p>Reste à payer : <b>${money(t.due)}</b></p><label class="f">Montant reçu (F)</label><input class="i" id="m-amt" type="number" inputmode="numeric" value="${t.due}">` });
+    if (!m) return;
+    try { await L.addPayment(o, $('#m-amt', m).value, t.paid ? 'Paiement' : (Number($('#m-amt', m).value) >= t.due ? 'Paiement' : 'Acompte')); toast('Paiement enregistré'); reload(); }
+    catch (err) { toast(err.message, true); }
   };
-  if ($('#o-wa', v)) $('#o-wa', v).onclick = () => openExternal(`https://wa.me/${waNumber(o.clientPhone)}?text=${encodeURIComponent(waText(o))}`);
+  if ($('#o-unpay', v)) $('#o-unpay', v).onclick = async () => {
+    if (!(await ask({ title: 'Annuler tous les paiements ?', text: 'La facture redeviendra impayée.', ok: 'Annuler les paiements', danger: true }))) return;
+    await L.clearPayments(o); toast('Paiements annulés'); reload();
+  };
+  if ($('#o-wa', v)) $('#o-wa', v).onclick = () => openWa(o, o.status === STATUS.PRET ? waReady(o) : waText(o));
+  $('#o-claim', v).onclick = () => newClaim(o, reload);
+  bindClaims(v, o, reload);
   if ($('#o-kgsave', v)) $('#o-kgsave', v).onclick = async () => {
     const val = $('#o-kg', v).value; o.weighedKg = val === '' ? null : Number(val);
     await L.saveOrder(o); toast('Poids enregistré'); reload();
@@ -358,11 +473,48 @@ routes.order = async (number) => {
   };
 };
 
+// ---------------------------------------------------------------- réclamations
+function claimCard(o, c) {
+  const piece = c.pieceIndex ? o.pieces.find((p) => p.index === c.pieceIndex) : null;
+  return `<div class="card edge ${c.status === 'open' ? 'late' : 'done'}">
+    <div class="row between"><b>${esc(L.CLAIM_TYPES[c.type] || c.type)}${piece ? ' · ' + esc(piece.name) + ` (pièce ${piece.index})` : ''}</b>
+      <span class="badge ${c.status === 'open' ? 'red' : 'green'}">${c.status === 'open' ? 'Ouverte' : 'Réglée'}</span></div>
+    ${c.note ? `<p class="small" style="margin:6px 0">${esc(c.note)}</p>` : ''}
+    <div class="small muted">Signalée le ${fmtDate(c.createdAt)}${c.resolvedAt ? ` · réglée le ${fmtDate(c.resolvedAt)}` : ''}</div>
+    ${c.resolution || c.compensation ? `<p class="small" style="margin:6px 0 0">✔ ${esc(c.resolution || '')}${c.compensation ? ` · dédommagement ${money(c.compensation)}` : ''}</p>` : ''}
+    ${c.status === 'open' ? `<button class="btn sm green" data-resolve="${c.id}" data-order="${o.number}" style="margin-top:8px">Marquer réglée</button>` : ''}
+  </div>`;
+}
+async function newClaim(o, after) {
+  const m = await ask({ title: `Réclamation · N°${o.number}`, ok: 'Enregistrer',
+    body: `<label class="f">Problème</label><select class="i" id="m-type">${Object.entries(L.CLAIM_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+      <label class="f" style="margin-top:8px">Pièce concernée</label><select class="i" id="m-piece"><option value="">Toute la commande</option>${o.pieces.map((p) => `<option value="${p.index}">Pièce ${p.index} · ${esc(p.name)}</option>`).join('')}</select>
+      <label class="f" style="margin-top:8px">Détail</label><input class="i" id="m-note" placeholder="ex. trou sur la manche gauche">` });
+  if (!m) return;
+  await L.addClaim(o, { type: $('#m-type', m).value, pieceIndex: Number($('#m-piece', m).value) || null, note: $('#m-note', m).value });
+  toast('Réclamation enregistrée'); after && after();
+}
+function bindClaims(root, o, after) {
+  $$('[data-resolve]', root).forEach((b) => {
+    b.onclick = async () => {
+      const order = o || (await L.getOrder(b.dataset.order));
+      const m = await ask({ title: 'Régler la réclamation', ok: 'Marquer réglée',
+        body: `<label class="f">Solution</label><input class="i" id="m-res" placeholder="ex. relavée, client satisfait">
+          <label class="f" style="margin-top:8px">Dédommagement versé (F) — facultatif</label><input class="i" id="m-comp" type="number" inputmode="numeric" placeholder="0">
+          <p class="small muted" style="margin-top:6px">Un dédommagement est ajouté automatiquement aux dépenses.</p>` });
+      if (!m) return;
+      await L.resolveClaim(order, Number(b.dataset.resolve), { resolution: $('#m-res', m).value, compensation: $('#m-comp', m).value });
+      toast('Réclamation réglée'); after && after();
+    };
+  });
+}
+
 function waText(o) {
   const t = orderTotals(o);
   const base = `Bonjour ${o.clientName}, ${S.name} : facture N°${o.number}, ${t.pieces} pièce(s), total ${money(t.total)}.`;
-  if (o.status === STATUS.PRET) return base + ' Votre linge est prêt.';
-  return base + ' Merci de votre confiance !';
+  const pay = t.due <= 0 ? ' Réglée, merci.' : t.paid ? ` Payé ${money(t.paid)}, reste ${money(t.due)}.` : '';
+  const due = L.dueDate(o) ? ` À rendre le ${fmtShort(L.dueDate(o))}.` : '';
+  return base + pay + due + ' Merci de votre confiance !';
 }
 
 routes.orders = async (_, q) => {
@@ -454,6 +606,7 @@ routes.verify = async (number, q, stage) => {
   $('#v-ok', v).onclick = (e) => busy(e.currentTarget, async () => {
     await L.advance(o, stage === 'cousin' ? STATUS.A_REPASSER : STATUS.PRET);
     toast(stage === 'cousin' ? 'Transmis au repassage' : 'Commande prête');
+    if (stage === 'final' && o.clientPhone && await ask({ title: 'Prévenir le client ?', text: `Envoyer « votre linge est prêt » à ${o.clientName} par WhatsApp.`, ok: '📲 WhatsApp', cancel: 'Plus tard' })) openWa(o, waReady(o));
     location.hash = `#/order/${o.number}`;
   });
   draw();
@@ -489,8 +642,8 @@ routes.deliveries = async () => {
         ${o.deliveryFee || o.deliveryPlace ? `Lieu : <b>${esc(o.deliveryPlace || 'à préciser')}</b><br>` : 'Retrait au pressing<br>'}
         ${o.deliveryAt ? `Heure : <b>${fmtShort(o.deliveryAt)}</b><br>` : ''}
         ${o.clientPhone ? `Client : <a href="tel:${esc(o.clientPhone)}">${esc(o.clientPhone)}</a><br>` : ''}
-        ${o.paid ? '<span class="badge green">Déjà payé</span>' : `À encaisser : <b>${money(t.total)}</b>`}</div>
-      ${o.paid ? '' : `<label class="check"><input type="checkbox" data-cash="${o.number}"> Argent encaissé</label>`}
+        ${t.due <= 0 ? '<span class="badge green">Déjà payé</span>' : `À encaisser : <b>${money(t.due)}</b>${t.paid ? ` <span class="small muted">(acompte ${money(t.paid)} reçu)</span>` : ''}`}</div>
+      ${t.due <= 0 ? '' : `<label class="check"><input type="checkbox" data-cash="${o.number}"> ${money(t.due)} encaissés</label>`}
       <div class="btns"><button class="btn green" data-deliv="${o.number}">Livré</button>
       ${o.clientPhone ? `<button class="btn" data-wa="${o.number}">WhatsApp</button>` : '<span></span>'}</div></div>`;
   }).join('') || '<div class="empty">Aucune commande prête.</div>');
@@ -499,12 +652,109 @@ routes.deliveries = async () => {
     if (d) {
       const o = await L.getOrder(d.dataset.deliv);
       const cb = $(`[data-cash="${o.number}"]`, v);
-      if (await deliverFlow(o, o.paid ? null : cb.checked)) routes.deliveries();
+      if (await deliverFlow(o, cb ? cb.checked : null)) routes.deliveries();
       return;
     }
     const w = e.target.closest('[data-wa]');
-    if (w) { const o = await L.getOrder(w.dataset.wa); openExternal(`https://wa.me/${waNumber(o.clientPhone)}?text=${encodeURIComponent(waText(o))}`); }
+    if (w) { const o = await L.getOrder(w.dataset.wa); openWa(o, waReady(o)); }
   };
+};
+
+routes.clients = async (_, q) => {
+  setNav('more');
+  setTop({ title: 'Clients', back: '#/more' });
+  const sort = q.get('t') || 'spent';
+  const all = L.listClients(await db.all('orders'));
+  const sorters = { spent: (a, b) => b.spent - a.spent, recent: (a, b) => b.lastAt.localeCompare(a.lastAt), due: (a, b) => b.due - a.due, count: (a, b) => b.orders.length - a.orders.length };
+  const v = view(`<input class="i" id="c-q" placeholder="Chercher un nom ou un numéro" autocomplete="off" style="margin-bottom:10px">
+    <div class="chips">${[['spent', 'Meilleurs clients'], ['recent', 'Récents'], ['count', 'Plus fidèles'], ['due', 'Qui doivent']].map(([k, l]) => `<a class="chip ${k === sort ? 'on' : ''}" href="#/clients?t=${k}">${l}</a>`).join('')}</div>
+    <p class="small muted" style="margin:0 0 8px">${all.length} client(s)</p>
+    <div id="c-list"></div>`);
+  const draw = (text = '') => {
+    const t = text.trim().toLowerCase(), d = t.replace(/\D/g, '');
+    let list = all.slice().sort(sorters[sort]);
+    if (sort === 'due') list = list.filter((c) => c.due > 0);
+    if (t) list = list.filter((c) => c.name.toLowerCase().includes(t) || (d.length >= 3 && c.phone.replace(/\D/g, '').includes(d)));
+    $('#c-list', v).innerHTML = list.slice(0, 200).map((c, i) => `<a class="card client-row" href="#/client/${encodeURIComponent(c.key)}">
+      <span class="rank">${sort === 'spent' && !t ? i + 1 : '👤'}</span>
+      <div class="grow"><b>${esc(c.name)}</b><div class="small muted">${esc(c.phone || 'sans numéro')} · ${c.orders.length} commande(s) · dernière ${fmtDate(c.lastAt, false)}</div></div>
+      <div class="right"><b>${money(c.spent)}</b>${c.due > 0 ? `<div class="small" style="color:var(--red)">doit ${money(c.due)}</div>` : ''}</div></a>`).join('') || '<div class="empty">Aucun client.</div>';
+  };
+  $('#c-q', v).oninput = (e) => draw(e.target.value);
+  draw();
+};
+
+routes.client = async (key) => {
+  setNav('more');
+  key = decodeURIComponent(key || '');
+  const c = L.listClients(await db.all('orders')).find((x) => x.key === key);
+  setTop({ title: 'Fiche client', back: '#/clients' });
+  if (!c) { view('<div class="empty">Client introuvable.</div>'); return; }
+  const lp = L.loyaltyProgress(S, c.orders.length);
+  const fav = {};
+  for (const o of c.orders) for (const i of o.items) fav[i.name] = (fav[i.name] || 0) + i.qty;
+  const favs = Object.entries(fav).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const v = view(`<div class="hero"><span>${c.orders.length} commande(s) depuis le ${fmtDate(c.firstAt, false)}</span><b>${esc(c.name)}</b>
+      <small>${esc(c.phone || 'sans numéro')}</small></div>
+    <div class="kpis" style="margin-top:10px">
+      <div class="kpi"><span>Total dépensé</span><b>${money(c.spent)}</b></div>
+      <div class="kpi"><span>Panier moyen</span><b>${money(c.spent / c.orders.length)}</b></div>
+      <div class="kpi"><span>Pièces confiées</span><b>${c.pieces}</b></div>
+      <div class="kpi"><span>Reste à payer</span><b style="color:${c.due ? 'var(--red)' : 'inherit'}">${money(c.due)}</b></div></div>
+    ${lp ? `<div class="card" style="margin-top:12px"><h3 class="ch-title">🎁 Fidélité</h3>
+      <div class="dots">${Array.from({ length: lp.every }, (_, i) => `<i class="${i < lp.done ? 'on' : ''} ${i === lp.every - 1 ? 'gift' : ''}"></i>`).join('')}</div>
+      <p class="small" style="margin:8px 0 0">${lp.left === 0 ? '<b>Sa prochaine commande est récompensée !</b>' : `Encore ${lp.left + 1} commande(s) avant la récompense`} (${S.loyaltyType === 'amount' ? money(S.loyaltyValue) : S.loyaltyValue + ' %'} toutes les ${lp.every} commandes).</p></div>` : ''}
+    <div class="btns" style="margin:12px 0">
+      <a class="btn primary" href="#/new?name=${encodeURIComponent(c.name)}&phone=${encodeURIComponent(c.phone)}">+ Nouvelle facture</a>
+      ${c.phone ? `<a class="btn" href="tel:${esc(c.phone)}">📞 Appeler</a>` : '<span></span>'}
+    </div>
+    ${favs.length ? `<div class="card"><h3 class="ch-title">Ce qu'il confie le plus</h3>${Charts.hbars(favs, (n) => n + ' pcs')}</div>` : ''}
+    <h2>Historique</h2>
+    ${c.orders.slice().reverse().map((o) => orderCard(o, { showAction: false })).join('')}`);
+  Charts.enableTips(v);
+};
+
+routes.claims = async (_, q) => {
+  setNav('more');
+  setTop({ title: 'Réclamations', back: '#/more' });
+  const showAll = q.get('all') === '1';
+  const orders = await db.all('orders');
+  const rows = [];
+  for (const o of orders) for (const c of o.claims || []) if (showAll || c.status === 'open') rows.push({ o, c });
+  rows.sort((a, b) => b.c.createdAt.localeCompare(a.c.createdAt));
+  const v = view(`<div class="seg" style="margin-bottom:12px"><a class="${showAll ? '' : 'on'}" href="#/claims">À régler</a><a class="${showAll ? 'on' : ''}" href="#/claims?all=1">Toutes</a></div>
+    <p class="small muted" style="margin:0 0 10px">Pour signaler un problème : ouvrez la facture → « ⚠️ Réclamation ».</p>
+    ${rows.map(({ o, c }) => `<a class="small" href="#/order/${o.number}" style="display:block;margin:0 0 4px 4px">N°${o.number} · ${esc(o.clientName)} ›</a>${claimCard(o, c)}`).join('') || `<div class="empty">${showAll ? 'Aucune réclamation.' : 'Aucune réclamation à régler. 👍'}</div>`}`);
+  bindClaims(v, null, () => routes.claims(_, q));
+};
+
+routes.cousin = async () => {
+  if (needAdmin('cousin')) return;
+  setNav('more');
+  setTop({ title: 'Compte du cousin', back: '#/more' });
+  const pays = await L.getCousinPayments();
+  const sm = L.cousinSummary(await db.all('orders'), pays);
+  const v = view(`<div class="hero ${sm.left > 0 ? 'neg' : ''}"><span>Reste à payer au cousin</span><b>${money(sm.left)}</b>
+      <small>${L.kg(sm.kg)} lavés · tarif actuel ${money(S.cousinRate)}/kg</small></div>
+    <div class="kpis" style="margin-top:10px"><div class="kpi"><span>Total dû (lavages)</span><b>${money(sm.owed)}</b></div>
+      <div class="kpi"><span>Déjà payé</span><b>${money(sm.paid)}</b></div></div>
+    <div class="card stack" style="margin-top:12px"><b>Enregistrer un paiement au cousin</b>
+      <div class="grid2"><div><label class="f">Montant (F)</label><input class="i" id="k-amt" type="number" inputmode="numeric" placeholder="${Math.max(0, sm.left)}"></div>
+        <div><label class="f">Date</label><input class="i" id="k-date" type="date" value="${L.todayIso()}"></div></div>
+      <input class="i" id="k-note" placeholder="Note (ex. espèces, MoMo)">
+      <button class="btn primary block" id="k-save">Enregistrer le paiement</button>
+      <p class="small muted" style="margin:0">Ne le saisissez pas aussi dans Dépenses : le lavage est déjà compté dans le bilan à partir des factures.</p></div>
+    ${pays.length ? `<h2>Paiements faits</h2><div class="card calc">${pays.slice().reverse().map((p) => `<div class="l"><span>${fmtDate(p.date, false)}${p.note ? ' · ' + esc(p.note) : ''}</span><span>${money(p.amount)} <button class="btn sm danger" data-kdel="${p.id}" style="min-height:30px;padding:2px 8px">✕</button></span></div>`).join('')}</div>` : ''}
+    <h2>Commandes envoyées (${sm.sent.length})</h2>
+    <div class="card calc">${sm.sent.slice(0, 100).map((r) => `<a class="l" href="#/order/${r.o.number}" style="color:inherit;text-decoration:none"><span>${fmtDate(r.at, false)} · N°${r.o.number} · ${L.kg(r.kg)}</span><span>${money(r.amount)}</span></a>`).join('') || '<p class="muted small">Aucune commande envoyée au cousin.</p>'}</div>`);
+  $('#k-save', v).onclick = async () => {
+    try { await L.addCousinPayment($('#k-amt', v).value, $('#k-note', v).value, $('#k-date', v).value); toast('Paiement enregistré'); routes.cousin(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $$('[data-kdel]', v).forEach((b) => { b.onclick = async () => {
+    if (!(await ask({ title: 'Supprimer ce paiement ?', ok: 'Supprimer', danger: true }))) return;
+    await L.deleteCousinPayment(Number(b.dataset.kdel)); routes.cousin();
+  }; });
 };
 
 routes.more = async () => {
@@ -513,6 +763,9 @@ routes.more = async () => {
   const lock = (t) => (S.adminPin && !unlocked ? `<span class="lock">🔒 ${t || ''}</span>` : '');
   const v = view(`<div class="card menu">
       <a href="#/ironing"><span class="ic">👕</span>Repassage</a>
+      <a href="#/clients"><span class="ic">👥</span>Clients</a>
+      <a href="#/claims"><span class="ic">⚠️</span>Réclamations</a>
+      <a href="#/cousin"><span class="ic">🧺</span>Compte du cousin${lock()}</a>
       <a href="#/orders?s=all"><span class="ic">🧾</span>Toutes les factures</a>
       <a href="#/bilan"><span class="ic">📊</span>Bilan${lock()}</a>
       <a href="#/expenses"><span class="ic">💸</span>Dépenses${lock()}</a>
@@ -709,6 +962,11 @@ routes.settings = async () => {
         <div><label class="f">Frais de livraison (F)</label><input class="i" id="s-deliv" type="number" value="${S.deliveryFee}"></div></div>
       <div class="grid2"><div><label class="f">% mis de côté</label><input class="i" id="s-sav" type="number" value="${S.savingsPercent}"></div>
         <div><label class="f">Premier N° de facture</label><input class="i" id="s-start" type="number" value="${S.invoiceStart}"></div></div>
+      <div class="grid2"><div><label class="f">Délai de rendu (jours)</label><input class="i" id="s-due" type="number" min="0" value="${S.dueDays}"></div><div></div></div>
+      <b style="margin-top:6px">🎁 Fidélité</b>
+      <div class="grid2"><div><label class="f">Récompense toutes les … commandes (0 = désactivé)</label><input class="i" id="s-lev" type="number" min="0" value="${S.loyaltyEvery}"></div>
+        <div><label class="f">Récompense</label><div class="row"><input class="i grow" id="s-lval" type="number" min="0" value="${S.loyaltyValue}"><select class="i" id="s-ltype" style="width:auto"><option value="percent" ${S.loyaltyType !== 'amount' ? 'selected' : ''}>%</option><option value="amount" ${S.loyaltyType === 'amount' ? 'selected' : ''}>F</option></select></div></div></div>
+      <p class="small muted" style="margin:0">Ex. 10 commandes et 100 % = la 10e commande est offerte ; 5 et 20 % = 20 % de remise toutes les 5 commandes.</p>
       <div><label class="f">Code administrateur (protège bilan, dépenses, réglages, marges). Vide = pas de code.</label><input class="i" id="s-pin" inputmode="numeric" value="${esc(S.adminPin)}" placeholder="ex. 2580"></div>
       <button class="btn primary block" id="s-save">Enregistrer les réglages</button></div>
     <h2>Grille d'articles</h2>
@@ -733,6 +991,8 @@ routes.settings = async () => {
       name: $('#s-name', v).value.trim() || 'Smart Pressing', city: $('#s-city', v).value.trim(), phone: $('#s-phone', v).value.trim(),
       cousinRate: Number($('#s-rate', v).value) || 0, deliveryFee: Number($('#s-deliv', v).value) || 0,
       savingsPercent: Number($('#s-sav', v).value) || 0, invoiceStart: Number($('#s-start', v).value) || 1, adminPin: pin,
+      dueDays: Math.max(0, Number($('#s-due', v).value) || 0), loyaltyEvery: Math.max(0, Number($('#s-lev', v).value) || 0),
+      loyaltyValue: Math.max(0, Number($('#s-lval', v).value) || 0), loyaltyType: $('#s-ltype', v).value,
     });
     if (pin) unlocked = true;
     await L.saveSettings(S); toast('Réglages enregistrés');
@@ -775,10 +1035,46 @@ async function restoreFrom(file) {
   catch (e) { toast(e.message, true); }
 }
 
+// ---------------------------------------------------------------- sauvegarde en ligne
+function cloudForm(c) {
+  return `<div><label class="f">Adresse du projet Supabase</label><input class="i" id="cl-url" placeholder="https://xxxx.supabase.co" value="${esc(c.url)}" autocomplete="off" autocapitalize="off"></div>
+    <div><label class="f">Clé « anon public »</label><input class="i" id="cl-key" placeholder="eyJhbGciOi…" value="${esc(c.key)}" autocomplete="off" autocapitalize="off"></div>
+    <div><label class="f">Mot de passe des sauvegardes (6 caractères min.) — notez-le bien !</label><input class="i" id="cl-pass" type="password" value="${esc(c.password)}" autocomplete="off"></div>`;
+}
+function readCloudForm(root, prev = {}) {
+  return { ...prev, url: $('#cl-url', root).value.trim(), key: $('#cl-key', root).value.trim(), password: $('#cl-pass', root).value };
+}
+async function pickAndRestore(c, after) {
+  let list;
+  try { list = await Cloud.listBackups(c); } catch (e) { toast(e.message, true); return; }
+  if (!list.length) { toast('Aucune sauvegarde en ligne trouvée.', true); return; }
+  const m = await ask({ title: 'Restaurer depuis internet', ok: 'Restaurer', danger: true,
+    body: `<label class="f">Sauvegarde</label><select class="i" id="m-file">${list.map((f) => `<option value="${f.name}">${fmtDate(f.date, false)}${f.size ? ` · ${Math.round(f.size / 1024)} Ko` : ''}</option>`).join('')}</select>
+      <p class="small muted" style="margin-top:8px">Les données actuelles de ce téléphone seront remplacées.</p>` });
+  if (!m) return;
+  try { await Cloud.restoreFromCloud(c, $('#m-file', m).value, c.password); toast('Données restaurées'); after && after(); }
+  catch (e) { toast(e.message, true); }
+}
+
+routes.cloud = async () => {
+  setNav('none');
+  setTop({ title: 'Restaurer depuis internet', back: '#/welcome' });
+  const v = view(`<div class="card stack"><p style="margin:0">Entrez les informations de votre sauvegarde en ligne (les mêmes que sur l'ancien téléphone).</p>
+    ${cloudForm({ url: '', key: '', password: '' })}
+    <button class="btn primary big block" id="cl-go">Voir mes sauvegardes</button></div>`);
+  $('#cl-go', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const c = { ...readCloudForm(v), enabled: true };
+    await pickAndRestore(c, async () => { await Cloud.setCloud(c); location.hash = '#/home'; await boot(); });
+  });
+};
+
 routes.backup = async () => {
   setNav('more');
   setTop({ title: 'Sauvegarde', back: '#/more' });
   const last = await db.kv('lastBackup');
+  const cloud = await Cloud.getCloud();
+  const cloudLast = (await db.kv('cloudLast')) || {};
+  const cloudOk = await db.kv('cloudLastOk');
   const [no, ne, np] = [await db.count('orders'), await db.count('expenses'), await db.count('photos')];
   const v = view(`<div class="card stack">
       <p style="margin:0">Toutes les données sont <b>uniquement dans ce téléphone</b>. S'il est perdu, cassé ou si l'appli est désinstallée, elles disparaissent.
@@ -786,6 +1082,21 @@ routes.backup = async () => {
       <p class="small muted" style="margin:0">Contenu : ${no} facture(s), ${ne} dépense(s), ${np} photo(s).<br>Dernière sauvegarde : <b>${last ? fmtDate(last) : 'jamais'}</b></p>
       <button class="btn primary big block" id="b-share">Créer et envoyer la sauvegarde</button>
       <button class="btn block" id="b-save">Enregistrer dans le téléphone</button>
+    </div>
+    <div class="card stack" id="b-cloud"><b>☁️ Sauvegarde automatique en ligne</b>
+      ${cloud.enabled ? `<p style="margin:0">✅ Activée : chaque soir à partir de 19 h, dès que l'appli est ouverte avec internet.</p>` : `<p style="margin:0" class="small">Chaque soir, la sauvegarde part toute seule sur internet (Supabase, gratuit), chiffrée avec votre mot de passe. Si le téléphone est perdu, tout se récupère sur un nouveau.</p>`}
+      ${cloudLast.at ? `<p class="small ${cloudLast.ok === false ? '' : 'muted'}" style="margin:0;${cloudLast.ok === false ? 'color:var(--red)' : ''}">${cloudLast.ok === false ? `⚠️ Échec le ${fmtDate(cloudLast.at)} : ${esc(cloudLast.error || '')}` : `Dernier envoi : ${fmtDate(cloudLast.at)}`}${cloudOk && cloudLast.ok === false ? ` · dernier envoi réussi : ${fmtDate(cloudOk)}` : ''}</p>` : ''}
+      ${cloud.enabled ? `<div class="btns"><button class="btn green" id="cl-now">Envoyer maintenant</button><button class="btn" id="cl-restore">Restaurer…</button></div>
+        <details><summary class="small muted">Modifier la configuration</summary><div class="stack" style="margin-top:10px">${cloudForm(cloud)}
+        <div class="btns"><button class="btn primary" id="cl-save">Enregistrer</button><button class="btn danger" id="cl-off">Désactiver</button></div></div></details>`
+      : `${isAdmin() ? `${cloudForm(cloud)}<button class="btn primary block" id="cl-save">Tester et activer</button>
+        <details class="guide"><summary>Comment faire ? (une seule fois, 5 minutes)</summary><ol>
+          <li>Sur <b>supabase.com</b>, créez un compte gratuit puis <b>New project</b> (nom : pressing ; région : Europe).</li>
+          <li>Menu <b>Storage</b> → <b>New bucket</b> → nom : <code>sauvegardes</code> (laissez « Public » décoché).</li>
+          <li>Menu <b>SQL Editor</b> → collez le code ci-dessous → <b>Run</b>.<br><button class="btn sm" id="cl-sql" type="button">Copier le code</button></li>
+          <li>Menu <b>Project Settings → API Keys</b> : copiez l'<b>adresse du projet</b> (Project URL) et la clé <b>anon public</b> (ou <b>publishable</b>).</li>
+          <li>Collez-les ici, choisissez un mot de passe, puis <b>Tester et activer</b>.</li></ol>
+          <p class="small muted">Gardez le mot de passe et ces informations sur papier : ils seront demandés pour restaurer sur un nouveau téléphone.</p></details>` : '<p class="small muted" style="margin:0">Déverrouillez le mode admin pour l’activer.</p>'}`}
     </div>
     <div class="card stack"><b>Restaurer</b>
       <p class="small muted" style="margin:0">Pour un nouveau téléphone : installez l'appli, puis choisissez le fichier de sauvegarde (.json).</p>
@@ -808,6 +1119,26 @@ routes.backup = async () => {
     toast(where ? 'Enregistré : ' + where : 'Sauvegarde créée'); routes.backup();
   });
   $('#b-file', v).onchange = (e) => restoreFrom(e.target.files[0]);
+  if ($('#cl-save', v)) $('#cl-save', v).onclick = (e) => busy(e.currentTarget, async () => {
+    if (needAdmin('backup')) return;
+    const c = readCloudForm(v, cloud);
+    if (!/^(https:\/\/|http:\/\/localhost)/.test(c.url) || !c.key) throw new Error('Adresse ou clé manquante.');
+    if ((c.password || '').length < 6) throw new Error('Mot de passe : 6 caractères minimum.');
+    await Cloud.backupNow(c);
+    await Cloud.setCloud({ ...c, enabled: true });
+    toast('Sauvegarde en ligne activée ✔'); routes.backup();
+  });
+  if ($('#cl-sql', v)) $('#cl-sql', v).onclick = async () => {
+    try { await navigator.clipboard.writeText(Cloud.SETUP_SQL); toast('Code copié'); }
+    catch (e) { await ask({ title: 'Code à coller dans Supabase', ok: 'OK', body: `<textarea class="i" rows="7" style="font-size:.75rem">${esc(Cloud.SETUP_SQL)}</textarea>` }); }
+  };
+  if ($('#cl-now', v)) $('#cl-now', v).onclick = (e) => busy(e.currentTarget, async () => { await Cloud.backupNow(); toast('Sauvegarde envoyée ✔'); routes.backup(); });
+  if ($('#cl-restore', v)) $('#cl-restore', v).onclick = () => pickAndRestore(cloud, async () => { location.hash = '#/home'; await boot(); });
+  if ($('#cl-off', v)) $('#cl-off', v).onclick = async () => {
+    if (needAdmin('backup')) return;
+    if (!(await ask({ title: 'Désactiver la sauvegarde en ligne ?', ok: 'Désactiver', danger: true }))) return;
+    await Cloud.setCloud({ ...cloud, enabled: false }); routes.backup();
+  };
 };
 
 // ---------------------------------------------------------------- routeur
@@ -818,7 +1149,7 @@ async function render() {
   const [name, arg, arg2] = path.split('/');
   const q = new URLSearchParams(qs || '');
   if (!connected) { await routes.login(); return; }
-  if (!(await L.isInitialized()) && name !== 'welcome') { location.hash = '#/welcome'; return; }
+  if (!(await L.isInitialized()) && name !== 'welcome' && name !== 'cloud') { location.hash = '#/welcome'; return; }
   const fn = routes[name] || routes.home;
   try { await fn(arg, q, arg2); }
   catch (e) { console.error(e); view(`<div class="flash err">Erreur : ${esc(e.message)}</div>`); }
@@ -832,8 +1163,20 @@ async function defaultLogo() {
   } catch (e) { return ''; }
 }
 
+let autoTimer = null;
+function startAutoBackup() {
+  const run = () => Cloud.autoBackup((ok) => { if (ok) toast('☁️ Sauvegarde du soir envoyée'); });
+  if (!autoTimer) {
+    autoTimer = setInterval(run, 15 * 60e3);
+    window.addEventListener('online', run);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) run(); });
+  }
+  setTimeout(run, 4000);
+}
+
 async function boot() {
   S = await L.getSettings();
+  if (await L.isInitialized()) startAutoBackup();
   if (!S.logo && !(await db.kv('logoRemoved'))) {
     const d = await defaultLogo();
     if (d) { S.logo = d; if (await L.isInitialized()) await L.saveSettings(S); }

@@ -3,7 +3,9 @@
 Toute la gestion du pressing dans **un seul téléphone**, sans serveur ni internet :
 écran « Bienvenue / Se connecter », factures PDF, photos des pièces, circuit cousin → repassage → livraison,
 vérification pièce par pièce (on coche chaque pièce), bilan par mois / 6 mois / année avec graphiques,
-export du bilan en PDF ou Excel, dépenses et bénéfice net.
+export du bilan en PDF ou Excel, dépenses et bénéfice net, fiches clients et fidélité, acomptes et paiements partiels,
+date promise et alertes de retard, message WhatsApp « linge prêt », compte du cousin, réclamations, ticket 58 mm,
+sauvegarde automatique chiffrée en ligne (Supabase).
 
 Les données sont enregistrées **dans le téléphone** (base IndexedDB de l'appli).
 
@@ -31,6 +33,16 @@ Adresse : **https://ori10.github.io/smart-pressing-app/** (publiée automatiquem
 
 Chaque téléphone a **sa propre base** : ce qui est saisi sur l'iPhone n'apparaît pas sur l'Android (et inversement).
 N'ouvrez l'appli iPhone que depuis l'icône de l'écran d'accueil (les données de Safari et de l'icône sont séparées).
+
+## Sauvegarde automatique en ligne
+Plus → Sauvegarde → « Sauvegarde automatique en ligne » : le guide pas à pas est dans l'appli (compte Supabase gratuit,
+dossier `sauvegardes`, code SQL à copier, adresse + clé + mot de passe). Ensuite, chaque soir à partir de 19 h, dès que
+l'appli est ouverte avec internet, la sauvegarde du jour est envoyée, **chiffrée** avec votre mot de passe.
+Nouveau téléphone : premier démarrage → « Restaurer depuis internet ».
+
+## Ticket 58 mm
+Facture → « Ticket 58 mm » crée un PDF au format ticket. Sur Android, installez l'appli gratuite **RawBT**
+(imprimantes thermiques Bluetooth ESC/POS), puis partagez le ticket vers RawBT pour l'imprimer.
 
 ## Sauvegardes (important)
 Le téléphone est la seule copie. Menu **Plus → Sauvegarde → Créer et envoyer la sauvegarde** : envoyez le fichier `.json`
