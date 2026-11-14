@@ -1,8 +1,8 @@
 # Smart Pressing : application Android autonome
 
 Toute la gestion du pressing dans **un seul téléphone**, sans serveur ni internet :
-factures PDF, étiquettes à code-barres, photos des pièces, circuit cousin → repassage → livraison,
-vérification par scan (caméra, lecteur Bluetooth ou saisie), bilan, dépenses et bénéfice net.
+écran « Bienvenue / Se connecter », factures PDF, photos des pièces, circuit cousin → repassage → livraison,
+vérification pièce par pièce (on coche chaque pièce), bilan, dépenses et bénéfice net.
 
 Les données sont enregistrées **dans le téléphone** (base IndexedDB de l'appli).
 
@@ -13,7 +13,7 @@ Le fichier `SmartPressing.apk` apparaît dans **Releases** (colonne de droite du
 ## Installer sur le téléphone
 1. Sur le téléphone, ouvrez la page **Releases** du dépôt et téléchargez `SmartPressing.apk`.
 2. Ouvrez le fichier. Android demande d'autoriser « Installer des applis inconnues » pour Chrome / Fichiers : acceptez.
-3. Ouvrez **Smart Pressing** → « Reprendre mes données » (reprend vos réglages, vos 11 articles et les factures N°19 et 20).
+3. Ouvrez **Smart Pressing** → « Se connecter » → « Reprendre mes données » (reprend vos réglages, vos 11 articles et les factures N°19 et 20).
 4. Réglages : ajoutez le logo et choisissez un **code administrateur** (protège bilan, dépenses, réglages et marges).
 
 Les mises à jour s'installent par-dessus l'ancienne version **sans perdre les données**
@@ -27,15 +27,16 @@ Nouveau téléphone : installez l'appli → « Restaurer une sauvegarde ».
 
 ## Différences avec la version Django
 - Un seul téléphone, donc plus de comptes séparés : un **code admin** remplace les rôles pour cacher l'argent aux employés.
-- Étiquettes et factures : PDF à partager (WhatsApp) ou à imprimer depuis le lecteur PDF du téléphone.
-- Bibliothèques (PDF, codes-barres, scan) et police embarquées : rien ne dépend d'internet.
+- Pas de codes-barres ni d'étiquettes : la vérification se fait en cochant chaque pièce à l'écran.
+- Factures : PDF à partager (WhatsApp) ou à imprimer depuis le lecteur PDF du téléphone.
+- Bibliothèques et police embarquées : rien ne dépend d'internet.
 
 ## Structure
 ```
 www/               l'application (HTML + CSS + JavaScript sans framework)
-  js/logic.js      règles métier : facture, statuts, scan, bilan, sauvegarde
+  js/logic.js      règles métier : facture, statuts, vérification, bilan, sauvegarde
   js/app.js        écrans
-  js/pdf.js        facture A4 et planche d'étiquettes (3 colonnes)
+  js/pdf.js        facture A4
   js/db.js         stockage dans le téléphone (IndexedDB)
   js/seed.js       données reprises de l'ancienne base db.sqlite3
 android/           projet Android (Capacitor 7)

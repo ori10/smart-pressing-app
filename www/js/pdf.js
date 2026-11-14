@@ -1,13 +1,7 @@
-// Facture PDF (A4) et planche d'étiquettes. jsPDF + JsBarcode, sans internet.
-import { orderCode, pieceCode, orderTotals, money, fmtDate, numberToWords, STATUS_LABEL } from './logic.js';
+// Facture PDF (A4). jsPDF, sans internet.
+import { orderTotals, money, fmtDate, numberToWords, STATUS_LABEL } from './logic.js';
 
 const NAVY = [15, 45, 87], BLUE = [28, 95, 166], GREY = [100, 110, 125], LIGHT = [238, 243, 250];
-
-function barcodePng(text, { height = 60, width = 2, displayValue = true, fontSize = 18 } = {}) {
-  const c = document.createElement('canvas');
-  window.JsBarcode(c, text, { format: 'CODE128', height, width, displayValue, fontSize, margin: 6, font: 'monospace' });
-  return { data: c.toDataURL('image/png'), w: c.width, h: c.height };
-}
 
 function imgSize(dataUrl) {
   return new Promise((resolve) => {
@@ -44,9 +38,6 @@ export async function invoicePdf(o, s) {
   const sub = [s.city, s.phone ? 'Tél. ' + s.phone : ''].filter(Boolean);
   sub.forEach((line, i) => doc.text(line, textX, y + 13 + i * 5));
 
-  const bc = barcodePng(orderCode(o.number), { height: 50, width: 2, fontSize: 16 });
-  const bw = 55, bh = (bc.h / bc.w) * bw;
-  doc.addImage(bc.data, 'PNG', R - bw, y - 2, bw, bh);
 
   // Bandeau facture
   y = 46;
@@ -113,35 +104,8 @@ export async function invoicePdf(o, s) {
 
   // Pied de page
   doc.setTextColor(...GREY); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
-  doc.text('Chaque pièce porte une étiquette ' + orderCode(o.number) + '-xx. Présentez cette facture pour le retrait.', W / 2, 280, { align: 'center' });
+  doc.text('Présentez cette facture pour le retrait de votre linge.', W / 2, 280, { align: 'center' });
   doc.text('Merci de votre confiance !', W / 2, 285, { align: 'center' });
-  return doc.output('blob');
-}
-
-// Planche d'étiquettes : 3 colonnes × 8 lignes par page A4.
-export function labelsPdf(o, s) {
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-  const cols = 3, rows = 8, mx = 8, my = 10;
-  const cw = (210 - 2 * mx) / cols, ch = (297 - 2 * my) / rows;
-  o.pieces.forEach((p, i) => {
-    const k = i % (cols * rows);
-    if (i > 0 && k === 0) doc.addPage();
-    const x = mx + (k % cols) * cw, y = my + Math.floor(k / cols) * ch;
-    doc.setDrawColor(200); doc.setLineDashPattern([1, 1], 0); doc.rect(x + 1, y + 1, cw - 2, ch - 2);
-    doc.setLineDashPattern([], 0);
-    const code = pieceCode(o.number, p.index);
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(...NAVY);
-    doc.text((s.name || '').slice(0, 26), x + 4, y + 5.5);
-    doc.setTextColor(20); doc.setFont('helvetica', 'normal');
-    doc.text(`N°${o.number} · ${p.index}/${o.pieces.length}`, x + cw - 4, y + 5.5, { align: 'right' });
-    const bc = barcodePng(code, { height: 40, width: 2, fontSize: 16 });
-    const bw = cw - 10, bh = Math.min(ch - 16, (bc.h / bc.w) * bw);
-    doc.addImage(bc.data, 'PNG', x + 5, y + 7, bw, bh);
-    doc.setFontSize(8);
-    const label = `${p.name}${p.homeWash ? ' (maison)' : ''} · ${o.clientName}`;
-    doc.text(doc.splitTextToSize(label, cw - 8)[0], x + cw / 2, y + ch - 3.5, { align: 'center' });
-  });
   return doc.output('blob');
 }
 

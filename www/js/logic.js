@@ -201,6 +201,16 @@ export async function scanPiece(o, stage, raw) {
   return { ok: true, message: `${p.name} ${c.code} vérifiée`, piece: p };
 }
 
+// Coche / décoche une pièce pendant une vérification. Renvoie true si elle est cochée.
+export async function togglePiece(o, stage, index) {
+  const p = stagePieces(o, stage).find((x) => x.index === index);
+  if (!p) return false;
+  p.checks = p.checks || {};
+  if (p.checks[stage]) delete p.checks[stage]; else p.checks[stage] = nowIso();
+  await saveOrder(o);
+  return !!p.checks[stage];
+}
+
 export async function reportGap(o, note) {
   note = (note || '').trim();
   if (!note) return;

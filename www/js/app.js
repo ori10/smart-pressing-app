@@ -1,8 +1,8 @@
 import { db } from './db.js';
 import * as L from './logic.js';
-import { invoicePdf, labelsPdf } from './pdf.js';
+import { invoicePdf } from './pdf.js';
 import { shareFile, saveFile, openExternal, waNumber, isNative } from './native.js';
-import { startCamera, stopCamera, beep } from './scan.js';
+import { beep } from './scan.js';
 
 const { STATUS, STATUS_LABEL, STATUS_TONE, money, fmtDate, fmtShort, orderTotals, pieceCode, orderCode } = L;
 const $ = (s, r = document) => r.querySelector(s);
@@ -11,7 +11,8 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 let S = null;            // réglages en cache
 let unlocked = false;    // mode administrateur déverrouillé (jusqu'à fermeture de l'appli)
-let cleanup = null;      // fonction appelée en quittant un écran (caméra…)
+let cleanup = null;      // fonction appelée en quittant un écran
+let connected = false;   // on passe par l'écran « Bienvenue » à chaque ouverture de l'appli
 const isAdmin = () => !S.adminPin || unlocked;
 
 // ---------------------------------------------------------------- outils d'affichage
@@ -145,10 +146,9 @@ const routes = {};
 
 routes.welcome = async () => {
   setNav('none');
-  setTop({ title: 'Bienvenue' });
+  setTop({ title: 'Premier démarrage' });
   const v = view(`<div class="welcome">
-    <div class="mark">SP</div>
-    <h1>Smart Pressing</h1>
+    <h1>Vos données</h1>
     <p class="muted">Toutes vos données restent dans ce téléphone.<br>Pas besoin d'internet.</p></div>
     <div class="card stack">
       <button class="btn primary big block" id="w-hist">Reprendre mes données</button>
@@ -159,6 +159,24 @@ routes.welcome = async () => {
   $('#w-hist', v).onclick = async () => { await L.initialize(true); location.hash = '#/home'; boot(); };
   $('#w-empty', v).onclick = async () => { await L.initialize(false); location.hash = '#/home'; boot(); };
   $('#w-file', v).onchange = (e) => restoreFrom(e.target.files[0]);
+};
+
+routes.login = async () => {
+  setNav('none');
+  $('#top').classList.add('hidden');
+  const v = view(`<div class="login">
+      ${S.logo ? `<img class="login-logo" src="${S.logo}" alt="">` : '<div class="mark">SP</div>'}
+      <p class="login-hello">Bienvenue</p>
+      <h1>${esc(S.name || 'Smart Pressing')}</h1>
+      <p class="muted">${esc(S.city || 'Gestion de pressing')}</p>
+      <button class="btn primary big block" id="l-go">Se connecter</button>
+    </div>`);
+  $('#l-go', v).onclick = () => {
+    connected = true;
+    $('#top').classList.remove('hidden');
+    const h = location.hash.replace(/^#\/?/, '');
+    if (!h || h.startsWith('login')) location.hash = '#/home'; else render();
+  };
 };
 
 routes.home = async () => {
@@ -273,13 +291,11 @@ routes.order = async (number) => {
         <div class="l total"><span>Total</span><span>${money(t.total)}</span></div>
       </div>
       ${o.deliveryPlace || o.deliveryAt ? `<p class="small" style="margin:6px 0 0">🚚 ${esc(o.deliveryPlace || 'Lieu à préciser')}${o.deliveryAt ? ' · ' + fmtShort(o.deliveryAt) : ''}</p>` : ''}
-      <div class="barcode"><svg id="o-bc"></svg></div>
     </div>
     ${o.note ? `<div class="note" style="margin-bottom:12px">Remarque : ${esc(o.note)}</div>` : ''}
     <div class="btns" style="margin-bottom:12px">
       <button class="btn navy" id="o-share">Envoyer le PDF</button>
       <button class="btn" id="o-dl">Télécharger</button>
-      <button class="btn" id="o-labels">Étiquettes</button>
       <button class="btn ${o.paid ? 'ghost' : 'green'}" id="o-paid">${o.paid ? 'Marquer impayé' : 'Marquer payé'}</button>
       ${o.clientPhone ? `<button class="btn" id="o-wa">WhatsApp</button>` : ''}
     </div>
@@ -293,14 +309,13 @@ routes.order = async (number) => {
     <div class="card">${o.pieces.map((p) => {
       const code = pieceCode(o.number, p.index); const ph = photos[p.index];
       return `<div class="piece">${ph ? `<img class="thumb" src="${ph}" data-full="${p.index}">` : '<div class="thumb">—</div>'}
-        <div class="grow"><code>${code}</code><div class="small">${esc(p.name)}${p.homeWash ? ' · maison' : ''}</div></div>
+        <div class="grow"><b>${esc(p.name)}</b><div class="small muted">Pièce ${p.index}/${o.pieces.length}${p.homeWash ? ' · maison' : ''}</div></div>
         <label class="btn sm">${ph ? 'Refaire' : 'Photo'}<input type="file" accept="image/*" capture="environment" data-photo="${p.index}" hidden></label></div>`;
     }).join('')}</div>
     <h2>Historique</h2>
     <div class="card timeline">${o.events.slice().reverse().map((e) => `<div class="ev"><span class="dot"></span><div><b>${esc(e.note && e.status === 0 ? e.note : STATUS_LABEL[e.status])}</b>${e.note && e.status !== 0 ? ' · ' + esc(e.note) : ''}<div class="small muted">${fmtDate(e.at)}</div></div></div>`).join('')}</div>
     ${isAdmin() ? `<button class="btn danger block" id="o-del" style="margin-top:6px">Supprimer cette facture</button>` : ''}
   `);
-  try { window.JsBarcode('#o-bc', orderCode(o.number), { format: 'CODE128', height: 55, width: 2, fontSize: 16, margin: 0 }); } catch (e) {}
   const reload = () => routes.order(number);
   if (act) $('#o-act', v).onclick = (e) => busy(e.currentTarget, () => runAction(o.number, reload));
   const pdfName = `Facture-${o.number}-${fileSafe(o.clientName)}.pdf`;
@@ -312,9 +327,6 @@ routes.order = async (number) => {
   $('#o-dl', v).onclick = (e) => busy(e.currentTarget, async () => {
     const where = await saveFile(await invoicePdf(o, S), pdfName);
     if (where) toast('Enregistré : ' + where);
-  });
-  $('#o-labels', v).onclick = (e) => busy(e.currentTarget, async () => {
-    await shareFile(labelsPdf(o, S), `Etiquettes-${o.number}.pdf`, `Étiquettes N°${o.number}`);
   });
   $('#o-paid', v).onclick = async () => {
     o.paid = !o.paid;
@@ -353,7 +365,7 @@ routes.orders = async (_, q) => {
   const filter = q.get('s') ?? 'open';
   const all = await L.allOrders();
   const chips = [['open', 'En cours'], ...STATUS_LABEL.map((l, i) => [String(i), l]), ['unpaid', 'Impayées'], ['today', 'Du jour'], ['all', 'Toutes']];
-  const v = view(`<form class="row" id="s-form" style="margin-bottom:10px"><input class="i grow" id="s-q" placeholder="Code PR…, nom, téléphone, N°" autocomplete="off" value="${esc(q.get('q') || '')}"><button class="btn navy">Chercher</button></form>
+  const v = view(`<form class="row" id="s-form" style="margin-bottom:10px"><input class="i grow" id="s-q" placeholder="Nom, téléphone ou N° de facture" autocomplete="off" value="${esc(q.get('q') || '')}"><button class="btn navy">Chercher</button></form>
     <div id="s-res"></div>
     <div class="chips">${chips.map(([k, l]) => `<a class="chip ${k === filter ? 'on' : ''}" href="#/orders?s=${k}">${l}</a>`).join('')}</div>
     <div id="s-list"></div>`);
@@ -400,11 +412,8 @@ routes.verify = async (number, q, stage) => {
   setTop({ title, back: `#/order/${o.number}` });
   const v = view(`<div class="card">
       <div class="row between"><b>N°${o.number} · ${esc(o.clientName)}</b><span id="v-count" class="badge blue"></span></div>
-      <div class="progress" style="margin-top:10px"><i id="v-bar"></i></div></div>
-    <button class="btn navy big block" id="v-cam">📷 Scanner avec la caméra</button>
-    <div class="scanbox hidden" id="v-box" style="margin-top:10px"><video id="v-video" muted playsinline></video></div>
-    <form class="row" id="v-form" style="margin-top:10px"><input class="i grow" id="v-input" placeholder="Lecteur / saisie : PR${L.pad(o.number, 4)}-01" autocomplete="off" autocapitalize="characters"><button class="btn primary">OK</button></form>
-    <div id="v-flash"></div>
+      <div class="progress" style="margin-top:10px"><i id="v-bar"></i></div>
+      <p class="small muted" style="margin:8px 0 0">Touchez chaque pièce quand vous l’avez bien en main.</p></div>
     <div class="card" id="v-list"></div>
     <div class="card stack"><label class="f">Remarque / écart</label><input class="i" id="v-note" placeholder="ex. bouton manquant, tache…"><button class="btn sm" id="v-gap">Signaler un écart</button></div>
     <button class="btn green big block" id="v-ok" disabled>${stage === 'cousin' ? 'Valider : transmettre au repasseur' : 'Valider : commande prête'}</button>`);
@@ -415,36 +424,22 @@ routes.verify = async (number, q, stage) => {
     const done = list.filter((p) => p.checks && p.checks[stage]).length;
     $('#v-count', v).textContent = `${done}/${list.length} pièces vérifiées`;
     $('#v-bar', v).style.width = (list.length ? (done / list.length) * 100 : 100) + '%';
-    let nextMarked = false;
     $('#v-list', v).innerHTML = list.map((p) => {
       const ok = p.checks && p.checks[stage];
-      const isNext = !ok && !nextMarked; if (isNext) nextMarked = true;
-      return `<div class="piece ${ok ? 'ok' : ''} ${isNext ? 'next' : ''}"><span class="tick">${ok ? '✓' : ''}</span>
-        <div class="grow"><b>${esc(p.name)}</b> <code>${pieceCode(o.number, p.index)}</code>${isNext ? '<div class="small muted">← à scanner</div>' : ''}</div>
+      return `<div class="piece tap ${ok ? 'ok' : ''}" data-idx="${p.index}"><span class="tick">${ok ? '✓' : ''}</span>
+        <div class="grow"><b>${esc(p.name)}</b><div class="small muted">Pièce ${p.index}/${o.pieces.length}</div></div>
         ${photos[p.index] ? `<img class="thumb" src="${photos[p.index]}" data-full="1">` : ''}</div>`;
     }).join('') + (stage === 'cousin' && o.pieces.some((p) => p.homeWash) ? `<p class="small muted">Les pièces « lavage maison » ne sont pas demandées ici.</p>` : '');
-    $$('[data-full]', v).forEach((img) => { img.onclick = () => showImage(img.src); });
     $('#v-ok', v).disabled = !L.stageComplete(o, stage);
   };
-  let lastCode = '', lastAt = 0;
-  const handle = async (raw) => {
-    const code = String(raw).trim().toUpperCase();
-    if (!code) return;
-    if (code === lastCode && Date.now() - lastAt < 2500) return;
-    lastCode = code; lastAt = Date.now();
-    const r = await L.scanPiece(o, stage, code);
-    beep(r.ok);
-    $('#v-flash', v).innerHTML = `<div class="flash ${r.ok ? 'ok' : 'err'}">${r.ok ? '✔ ' : '✖ '}${esc(r.message)}</div>`;
+  $('#v-list', v).onclick = async (e) => {
+    const img = e.target.closest('[data-full]');
+    if (img) { showImage(img.src); return; }
+    const row = e.target.closest('[data-idx]'); if (!row) return;
+    const on = await L.togglePiece(o, stage, Number(row.dataset.idx));
+    beep(on);
     draw();
-    if (r.ok && L.stageComplete(o, stage)) { toast('Toutes les pièces sont vérifiées'); stopCamera(); $('#v-box', v).classList.add('hidden'); }
-  };
-  $('#v-form', v).onsubmit = (e) => { e.preventDefault(); const i = $('#v-input', v); lastCode = ''; handle(i.value); i.value = ''; i.focus(); };
-  $('#v-cam', v).onclick = async () => {
-    const box = $('#v-box', v);
-    if (!box.classList.contains('hidden')) { stopCamera(); box.classList.add('hidden'); return; }
-    box.classList.remove('hidden');
-    try { await startCamera($('#v-video', v), handle); }
-    catch (e) { box.classList.add('hidden'); toast('Caméra indisponible : utilisez la saisie.', true); }
+    if (on && L.stageComplete(o, stage)) toast('Toutes les pièces sont vérifiées');
   };
   $('#v-gap', v).onclick = async () => {
     const n = $('#v-note', v).value; if (!n.trim()) return;
@@ -452,11 +447,9 @@ routes.verify = async (number, q, stage) => {
   };
   $('#v-ok', v).onclick = (e) => busy(e.currentTarget, async () => {
     await L.advance(o, stage === 'cousin' ? STATUS.A_REPASSER : STATUS.PRET);
-    stopCamera();
     toast(stage === 'cousin' ? 'Transmis au repassage' : 'Commande prête');
     location.hash = `#/order/${o.number}`;
   });
-  cleanup = stopCamera;
   draw();
 };
 
@@ -764,6 +757,7 @@ async function render() {
   const [path, qs] = raw.split('?');
   const [name, arg, arg2] = path.split('/');
   const q = new URLSearchParams(qs || '');
+  if (!connected) { await routes.login(); return; }
   if (!(await L.isInitialized()) && name !== 'welcome') { location.hash = '#/welcome'; return; }
   const fn = routes[name] || routes.home;
   try { await fn(arg, q, arg2); }
