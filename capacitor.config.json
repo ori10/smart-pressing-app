@@ -2,5 +2,12 @@
   "appId": "com.smartpressing.app",
   "appName": "Smart Pressing",
   "webDir": "www",
-  "android": { "allowMixedContent": false }
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#F08A24"
+    }
+  }
 }

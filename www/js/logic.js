@@ -26,7 +26,8 @@ export const catInvest = (k) => !!(EXPENSE_CATEGORIES.find((c) => c.key === k) |
 const DEFAULT_SETTINGS = {
   name: 'Smart Pressing', city: '', phone: '', logo: '',
   cousinRate: 400, deliveryFee: 500, savingsPercent: 25, invoiceStart: 1, adminPin: '',
-  dueDays: 2, loyaltyEvery: 10, loyaltyType: 'percent', loyaltyValue: 20,
+  dueDays: 2, loyaltyEvery: 10, loyaltyType: 'percent', loyaltyValue: 20, monthlyReport: true,
+  volumeMin: 5000, volumePercent: 10,
 };
 
 // ---------- formatage ----------
@@ -175,6 +176,12 @@ export function loyaltyReward(s, previousCount, subtotal) {
   const amount = s.loyaltyType === 'amount' ? Math.min(v, subtotal) : Math.round(subtotal * Math.min(100, v) / 100);
   const label = `Fidélité : ${previousCount + 1}e commande (${s.loyaltyType === 'amount' ? money(v) : v + ' %'})`;
   return { amount, label };
+}
+// Remise sur grosse commande : X % dès que les articles atteignent le seuil (livraison non comprise).
+export function volumeReward(s, subtotal) {
+  const min = Number(s.volumeMin) || 0, pct = Number(s.volumePercent) || 0;
+  if (min <= 0 || pct <= 0 || subtotal < min) return null;
+  return { amount: Math.round(subtotal * Math.min(100, pct) / 100), label: `Remise ${pct} % (dès ${money(min)})` };
 }
 export function loyaltyProgress(s, count) {
   const every = Number(s.loyaltyEvery) || 0;
@@ -565,3 +572,22 @@ export function numberToWords(n) {
   if (rest) parts.push(below1000(rest));
   return parts.join('-');
 }
+
+// ---------- bilan mensuel automatique ----------
+// Renvoie les bilans à proposer : le mois écoulé, et en janvier l'année écoulée.
+export async function pendingReports(s) {
+  if (s.monthlyReport === false) return [];
+  const out = [];
+  const snooze = await db.kv('reportSnooze');
+  if (snooze === todayIso()) return [];
+  const firstOrder = (await db.all('orders')).map((o) => o.createdAt).sort()[0];
+  if (!firstOrder) return [];
+  const pm = period('month', -1);
+  if (firstOrder.slice(0, 10) <= pm.end && (await db.kv('reportDone:' + pm.start.slice(0, 7))) !== true) out.push(pm);
+  if (new Date().getMonth() === 0) {
+    const py = period('year', -1);
+    if (firstOrder.slice(0, 10) <= py.end && (await db.kv('reportDone:' + py.start.slice(0, 4))) !== true) out.push(py);
+  }
+  return out;
+}
+export const reportKey = (p) => (p.kind === 'year' ? p.start.slice(0, 4) : p.start.slice(0, 7));

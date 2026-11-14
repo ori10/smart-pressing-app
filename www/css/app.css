@@ -258,3 +258,6 @@ body.white, body.white main { background: #fff; }
 .guide ol { padding-left: 20px; margin: 8px 0; font-size: .9rem; line-height: 1.5; }
 .guide li { margin-bottom: 8px; }
 .guide code { background: var(--soft-blue); padding: 1px 6px; border-radius: 6px; }
+
+.card.report { border: 2px solid var(--blue); background: linear-gradient(180deg, var(--soft-blue), #fff 60%); }
+.card.report .x { background: none; border: 0; font-size: 1.1rem; color: var(--muted); padding: 4px 8px; }

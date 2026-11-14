@@ -5,7 +5,7 @@ import { invoicePdf, ticketPdf } from './pdf.js';
 import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
 import * as Charts from './charts.js';
 import * as Cloud from './cloud.js';
-import { shareFile, saveFile, openExternal, waNumber, isNative } from './native.js';
+import { shareFile, saveFile, openExternal, waNumber, isNative, scheduleMonthlyReminder } from './native.js';
 import { beep } from './scan.js';
 
 const { STATUS, STATUS_LABEL, STATUS_TONE, money, fmtDate, fmtShort, orderTotals, pieceCode, orderCode } = L;
@@ -168,6 +168,25 @@ function waReady(o) {
 }
 function openWa(o, text) { openExternal(`https://wa.me/${waNumber(o.clientPhone)}?text=${encodeURIComponent(text)}`); }
 
+// ---------------------------------------------------------------- bilan mensuel automatique
+async function reportBlob(p, fmt) {
+  const b = L.computeBilan(await db.all('orders'), await db.all('expenses'), p, S);
+  return fmt === 'pdf' ? bilanPdf(b, p, S) : bilanXlsx(b, p, S);
+}
+// Android : range une copie PDF + Excel dans Documents/SmartPressing/Bilans (une seule fois par période).
+async function archiveReports(reports) {
+  if (!isNative) return;
+  for (const p of reports) {
+    const k = 'reportArchived:' + L.reportKey(p);
+    if (await db.kv(k)) continue;
+    try {
+      for (const fmt of ['pdf', 'xlsx']) await saveFile(await reportBlob(p, fmt), bilanFileName(p, fmt), { folder: 'SmartPressing/Bilans', silent: true });
+      await db.kv(k, L.nowIso());
+      toast(`📊 Bilan ${p.label} rangé dans Documents`);
+    } catch (e) { console.warn(e); }
+  }
+}
+
 // ---------------------------------------------------------------- écrans
 const routes = {};
 
@@ -227,11 +246,19 @@ routes.home = async () => {
     const days = last ? Math.floor((Date.now() - new Date(last).getTime()) / 864e5) : null;
     if (days === null || days >= 7) backupNote = `<a href="#/backup" class="note" style="display:block;text-decoration:none;margin-bottom:12px">⚠️ ${days === null ? 'Aucune sauvegarde faite.' : `Dernière sauvegarde il y a ${days} jours.`} Toutes les données sont dans ce téléphone : faites une sauvegarde.</a>`;
   }
+  const reports = await L.pendingReports(S);
+  const reportCards = reports.map((p) => isAdmin()
+    ? `<div class="card report" data-rk="${p.kind}:${p.offset}"><div class="row between"><b>📊 Bilan ${p.kind === 'year' ? 'de l’' + p.label.toLowerCase() : 'de ' + p.label.toLowerCase()} prêt</b><button class="x" data-mr="later" aria-label="Plus tard">✕</button></div>
+        <p class="small muted" style="margin:4px 0 10px">${isNative ? 'Une copie est rangée dans Documents/SmartPressing/Bilans. ' : ''}Envoyez-le en un toucher (WhatsApp, e-mail…).</p>
+        <div class="btns three"><button class="btn navy sm" data-mr="pdf">PDF</button><button class="btn green sm" data-mr="xlsx">Excel</button><button class="btn sm" data-mr="view">Voir</button></div>
+        <button class="btn sm ghost block" data-mr="done" style="margin-top:8px">C'est fait, ne plus afficher</button></div>`
+    : `<a href="#/unlock?next=home" class="note" style="display:block;text-decoration:none;margin-bottom:12px">📊 Le bilan ${p.kind === 'year' ? 'de l’année' : 'du mois'} est prêt (mode admin).</a>`).join('');
   const now = new Date();
   const hello = now.getHours() < 18 ? 'Bonjour' : 'Bonsoir';
-  view(`<h1>${hello} 👋</h1>
+  const hv = view(`<h1>${hello} 👋</h1>
     <p class="muted" style="margin:4px 0 14px">${fmtDate(L.todayIso(), false)} · ${c.open} commande(s) en cours</p>
     ${backupNote}
+    ${reportCards}
     <a class="btn primary big block" href="#/new" style="margin-bottom:14px">+ Nouvelle facture</a>
     ${c.late.length ? `<div class="card edge late"><b style="color:var(--red)">⏰ ${c.late.length} commande(s) en retard</b>${c.late.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)}</span><span>promis ${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
     ${c.soon.length ? `<div class="card edge orange"><b style="color:#a65200">À rendre dans les 24 h : ${c.soon.length}</b>${c.soon.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)} · ${STATUS_LABEL[o.status]}</span><span>${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
@@ -245,6 +272,23 @@ routes.home = async () => {
       ${c.claims ? `<a class="tile red wide" href="#/claims"><b>${c.claims}</b><span>Réclamation(s) à régler</span></a>` : ''}
       ${isAdmin() ? `<a class="tile navy wide" href="#/bilan"><b>${money(c.todayCA)}</b><span>Chiffre d'affaires du jour</span></a>` : ''}
     </div>`);
+  $$('.report', hv).forEach((card) => {
+    const [kind, off] = card.dataset.rk.split(':');
+    const p = L.period(kind, Number(off));
+    card.onclick = async (e) => {
+      const b = e.target.closest('[data-mr]'); if (!b) return;
+      const act = b.dataset.mr;
+      if (act === 'later') { await db.kv('reportSnooze', L.todayIso()); toast('Rappel demain'); return routes.home(); }
+      if (act === 'done') { await db.kv('reportDone:' + L.reportKey(p), true); return routes.home(); }
+      if (act === 'view') { location.hash = `#/bilan?k=${kind}&o=${off}`; return; }
+      await busy(b, async () => {
+        const blob = await reportBlob(p, act);
+        const r = await shareFile(blob, bilanFileName(p, act), 'Bilan ' + p.label);
+        if (r !== 'cancelled') { await db.kv('reportSent:' + L.reportKey(p), L.nowIso()); toast('Bilan envoyé'); }
+      });
+    };
+  });
+  archiveReports(reports);
 };
 
 routes.new = async (_, q) => {
@@ -256,6 +300,7 @@ routes.new = async (_, q) => {
   const qty = {};
   let client = null;          // client reconnu (fiche)
   let loyaltyOn = true;
+  let volumeOn = true;
   const v = view(`<div class="card">
       <div class="grid2">
         <div><label class="f">Nom du client</label><input class="i" id="n-name" autocomplete="off" autocapitalize="words" value="${esc(q.get('name') || '')}"></div>
@@ -292,9 +337,11 @@ routes.new = async (_, q) => {
     const deliv = $('#n-deliv', v).checked ? Number(S.deliveryFee) || 0 : 0;
     const reward = client ? L.loyaltyReward(S, client.orders.length, items) : (null);
     const loyal = reward && loyaltyOn ? reward.amount : 0;
+    const volReward = L.volumeReward(S, items);
+    const vol = volReward && volumeOn ? volReward.amount : 0;
     const manual = Math.max(0, Math.round(Number($('#n-disc', v).value) || 0));
-    const discount = Math.min(items + deliv, loyal + manual);
-    return { items, est, n, deliv, reward, loyal, manual, discount, total: items + deliv - discount };
+    const discount = Math.min(items + deliv, loyal + vol + manual);
+    return { items, est, n, deliv, reward, loyal, volReward, vol, manual, discount, total: items + deliv - discount };
   };
   const recalc = () => {
     const s = sums();
@@ -304,8 +351,10 @@ routes.new = async (_, q) => {
     $('#n-kg', v).placeholder = `estimé : ${L.kg(s.est)}`;
     $('#n-total', v).textContent = money(s.total);
     $('#n-admin', v).textContent = (s.n ? `${s.n} pièce(s)` : '') + (s.discount ? ` · remise ${money(s.discount)}` : '') + (isAdmin() && s.n ? ` · Lavage ${money(wash)} · marge ${money(s.total - wash)}` : '');
-    $('#n-loyal', v).innerHTML = s.reward ? `<label class="check loyal"><input type="checkbox" id="n-loyal-on" ${loyaltyOn ? 'checked' : ''}> 🎁 ${esc(s.reward.label)} : −${money(s.reward.amount)}</label>` : '';
+    $('#n-loyal', v).innerHTML = (s.volReward ? `<label class="check loyal"><input type="checkbox" id="n-vol-on" ${volumeOn ? 'checked' : ''}> 💰 ${esc(s.volReward.label)} : −${money(s.volReward.amount)}</label>` : '')
+      + (s.reward ? `<label class="check loyal" style="margin-top:6px"><input type="checkbox" id="n-loyal-on" ${loyaltyOn ? 'checked' : ''}> 🎁 ${esc(s.reward.label)} : −${money(s.reward.amount)}</label>` : '');
     if ($('#n-loyal-on', v)) $('#n-loyal-on', v).onchange = (e) => { loyaltyOn = e.target.checked; recalc(); };
+    if ($('#n-vol-on', v)) $('#n-vol-on', v).onchange = (e) => { volumeOn = e.target.checked; recalc(); };
     const dep = Math.round(Number($('#n-dep', v).value) || 0);
     $('#n-rest', v).textContent = s.total ? (dep >= s.total ? 'Facture soldée' : dep > 0 ? `Reste à payer : ${money(s.total - dep)}` : 'Rien payé pour l’instant') : '';
   };
@@ -349,6 +398,7 @@ routes.new = async (_, q) => {
   $('#n-go', v).onclick = (e) => busy(e.currentTarget, async () => {
     const s = sums();
     const labels = [];
+    if (s.vol) labels.push(s.volReward.label);
     if (s.loyal) labels.push(s.reward.label);
     if (s.manual) labels.push('Remise');
     const o = await L.createOrder({
@@ -963,6 +1013,11 @@ routes.settings = async () => {
       <div class="grid2"><div><label class="f">% mis de côté</label><input class="i" id="s-sav" type="number" value="${S.savingsPercent}"></div>
         <div><label class="f">Premier N° de facture</label><input class="i" id="s-start" type="number" value="${S.invoiceStart}"></div></div>
       <div class="grid2"><div><label class="f">Délai de rendu (jours)</label><input class="i" id="s-due" type="number" min="0" value="${S.dueDays}"></div><div></div></div>
+      <label class="check"><input type="checkbox" id="s-mr" ${S.monthlyReport !== false ? 'checked' : ''}> 📊 Bilan mensuel automatique (le 1er du mois${isNative ? ', avec notification à 9 h' : ''})</label>
+      <b style="margin-top:6px">💰 Remise sur grosse commande</b>
+      <div class="grid2"><div><label class="f">À partir de (F, articles)</label><input class="i" id="s-vmin" type="number" min="0" value="${S.volumeMin}"></div>
+        <div><label class="f">Remise (%)</label><input class="i" id="s-vpct" type="number" min="0" max="100" value="${S.volumePercent}"></div></div>
+      <p class="small muted" style="margin:0">0 dans l'un des deux champs = pas de remise automatique.</p>
       <b style="margin-top:6px">🎁 Fidélité</b>
       <div class="grid2"><div><label class="f">Récompense toutes les … commandes (0 = désactivé)</label><input class="i" id="s-lev" type="number" min="0" value="${S.loyaltyEvery}"></div>
         <div><label class="f">Récompense</label><div class="row"><input class="i grow" id="s-lval" type="number" min="0" value="${S.loyaltyValue}"><select class="i" id="s-ltype" style="width:auto"><option value="percent" ${S.loyaltyType !== 'amount' ? 'selected' : ''}>%</option><option value="amount" ${S.loyaltyType === 'amount' ? 'selected' : ''}>F</option></select></div></div></div>
@@ -993,9 +1048,12 @@ routes.settings = async () => {
       savingsPercent: Number($('#s-sav', v).value) || 0, invoiceStart: Number($('#s-start', v).value) || 1, adminPin: pin,
       dueDays: Math.max(0, Number($('#s-due', v).value) || 0), loyaltyEvery: Math.max(0, Number($('#s-lev', v).value) || 0),
       loyaltyValue: Math.max(0, Number($('#s-lval', v).value) || 0), loyaltyType: $('#s-ltype', v).value,
+      monthlyReport: $('#s-mr', v).checked,
+      volumeMin: Math.max(0, Number($('#s-vmin', v).value) || 0), volumePercent: Math.min(100, Math.max(0, Number($('#s-vpct', v).value) || 0)),
     });
     if (pin) unlocked = true;
     await L.saveSettings(S); toast('Réglages enregistrés');
+    scheduleMonthlyReminder(S.monthlyReport !== false);
   };
   const collect = () => $$('#a-list [data-id]', v).map((card, i) => ({
     id: Number(card.dataset.id), position: i,
@@ -1142,7 +1200,15 @@ routes.backup = async () => {
 };
 
 // ---------------------------------------------------------------- routeur
+// Un seul écran se dessine à la fois : si on change d'écran pendant un chargement, le dernier demandé gagne.
+let rendering = null, renderAgain = false;
 async function render() {
+  if (rendering) { renderAgain = true; return rendering; }
+  rendering = (async () => { do { renderAgain = false; await renderNow(); } while (renderAgain); })();
+  try { await rendering; } finally { rendering = null; }
+}
+
+async function renderNow() {
   if (cleanup) { try { cleanup(); } catch (e) {} cleanup = null; }
   const raw = location.hash.replace(/^#\/?/, '') || 'home';
   const [path, qs] = raw.split('?');
@@ -1176,7 +1242,10 @@ function startAutoBackup() {
 
 async function boot() {
   S = await L.getSettings();
-  if (await L.isInitialized()) startAutoBackup();
+  if (await L.isInitialized()) {
+    startAutoBackup();
+    if (isNative && !(await db.kv('reminderScheduled'))) { if (await scheduleMonthlyReminder(S.monthlyReport !== false)) await db.kv('reminderScheduled', true); }
+  }
   if (!S.logo && !(await db.kv('logoRemoved'))) {
     const d = await defaultLogo();
     if (d) { S.logo = d; if (await L.isInitialized()) await L.saveSettings(S); }

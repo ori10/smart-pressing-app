@@ -5,7 +5,8 @@ Toute la gestion du pressing dans **un seul téléphone**, sans serveur ni inter
 vérification pièce par pièce (on coche chaque pièce), bilan par mois / 6 mois / année avec graphiques,
 export du bilan en PDF ou Excel, dépenses et bénéfice net, fiches clients et fidélité, acomptes et paiements partiels,
 date promise et alertes de retard, message WhatsApp « linge prêt », compte du cousin, réclamations, ticket 58 mm,
-sauvegarde automatique chiffrée en ligne (Supabase).
+sauvegarde automatique chiffrée en ligne (Supabase), remise automatique sur grosse commande (10 % dès 5 000 F d'articles,
+réglable), bilan mensuel automatique (carte le 1er du mois, copie dans Documents/SmartPressing/Bilans et notification sur Android).
 
 Les données sont enregistrées **dans le téléphone** (base IndexedDB de l'appli).
 

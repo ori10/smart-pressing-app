@@ -49,17 +49,19 @@ export async function shareFile(blob, filename, title = '') {
 }
 
 // Enregistre le fichier dans le dossier Documents du téléphone (ou téléchargement dans le navigateur).
-export async function saveFile(blob, filename) {
+export async function saveFile(blob, filename, { folder = 'SmartPressing', silent = false } = {}) {
   if (isNative) {
     const data = await blobToBase64(blob);
     try {
-      await Filesystem.writeFile({ path: 'SmartPressing/' + filename, data, directory: 'DOCUMENTS', recursive: true });
-      return 'Documents/SmartPressing/' + filename;
+      await Filesystem.writeFile({ path: folder + '/' + filename, data, directory: 'DOCUMENTS', recursive: true });
+      return 'Documents/' + folder + '/' + filename;
     } catch (e) {
+      if (silent) return null;
       await shareFile(blob, filename, filename);
       return null;
     }
   }
+  if (silent) return null;
   download(blob, filename);
   return filename;
 }
@@ -76,4 +78,22 @@ export function waNumber(phone) {
   if (d.startsWith('00')) d = d.slice(2);
   if (!d.startsWith('229') || d.length <= 10) d = '229' + d;
   return d;
+}
+
+// Rappel le 1er de chaque mois à 9 h (Android : notification même appli fermée).
+const Notif = isNative ? plugin('LocalNotifications') : null;
+export async function scheduleMonthlyReminder(on) {
+  if (!Notif) return false;
+  try {
+    await Notif.cancel({ notifications: [{ id: 101 }] });
+    if (!on) return true;
+    let perm = await Notif.checkPermissions();
+    if (perm.display !== 'granted') perm = await Notif.requestPermissions();
+    if (perm.display !== 'granted') return false;
+    await Notif.schedule({ notifications: [{
+      id: 101, title: 'Smart Pressing', body: 'Le bilan du mois dernier est prêt : ouvrez l’appli pour l’envoyer.',
+      schedule: { on: { day: 1, hour: 9, minute: 0 }, repeats: true, allowWhileIdle: true },
+    }] });
+    return true;
+  } catch (e) { console.warn('rappel', e); return false; }
 }
