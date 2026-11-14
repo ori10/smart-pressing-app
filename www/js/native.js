@@ -1,8 +1,12 @@
 // Pont entre l'appli Android (Capacitor) et le navigateur : partage de fichiers, liens externes.
 const Cap = window.Capacitor;
 export const isNative = !!(Cap && Cap.isNativePlatform && Cap.isNativePlatform());
-const Filesystem = isNative ? Cap.registerPlugin('Filesystem') : null;
-const Share = isNative ? Cap.registerPlugin('Share') : null;
+function plugin(name) {
+  try { return Cap.registerPlugin ? Cap.registerPlugin(name) : (Cap.Plugins && Cap.Plugins[name]); }
+  catch (e) { return Cap.Plugins && Cap.Plugins[name]; }
+}
+const Filesystem = isNative ? plugin('Filesystem') : null;
+const Share = isNative ? plugin('Share') : null;
 
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
