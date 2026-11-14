@@ -36,7 +36,7 @@ function setNav(active) {
 }
 
 function setTop({ title, back, right = '' }) {
-  const logo = !back && S.logo ? `<img class="logo" src="${S.logo}" alt="">` : '';
+  const logo = !back ? `<img class="logo" src="icons/icon-192.png" alt="">` : '';
   $('#top').innerHTML = `${back ? `<button class="back" data-back="${back}" aria-label="Retour">←</button>` : ''}${logo}<div class="title">${esc(title)}</div>${right}`;
   const b = $('[data-back]', $('#top'));
   if (b) b.onclick = () => { location.hash = b.dataset.back; };
@@ -167,16 +167,18 @@ routes.welcome = async () => {
 routes.login = async () => {
   setNav('none');
   $('#top').classList.add('hidden');
+  document.body.classList.add('white');
   const v = view(`<div class="login">
       ${S.logo ? `<img class="login-logo" src="${S.logo}" alt="">` : '<div class="mark">SP</div>'}
       <p class="login-hello">Bienvenue</p>
-      <h1>${esc(S.name || 'Smart Pressing')}</h1>
+      ${S.logo ? '' : `<h1>${esc(S.name || 'Smart Pressing')}</h1>`}
       <p class="muted">${esc(S.city || 'Gestion de pressing')}</p>
       <button class="btn primary big block" id="l-go">Se connecter</button>
     </div>`);
   $('#l-go', v).onclick = () => {
     connected = true;
     $('#top').classList.remove('hidden');
+    document.body.classList.remove('white');
     const h = location.hash.replace(/^#\/?/, '');
     if (!h || h.startsWith('login')) location.hash = '#/home'; else render();
   };
@@ -697,7 +699,7 @@ routes.settings = async () => {
   setTop({ title: 'Réglages', back: '#/more' });
   const arts = await L.getArticles();
   const v = view(`<div class="card stack"><b>Le pressing</b>
-      <div class="row">${S.logo ? `<img src="${S.logo}" style="width:64px;height:64px;border-radius:12px;object-fit:cover">` : '<div class="thumb" style="width:64px;height:64px;border-radius:12px;background:var(--bg);display:grid;place-items:center" >logo</div>'}
+      <div class="row">${S.logo ? `<img src="${S.logo}" style="width:110px;height:68px;border-radius:12px;object-fit:contain;background:#fff;border:1px solid var(--line)">` : '<div class="thumb" style="width:64px;height:64px;border-radius:12px;background:var(--bg);display:grid;place-items:center" >logo</div>'}
         <label class="btn sm">Choisir le logo<input type="file" accept="image/*" id="s-logo" hidden></label>${S.logo ? '<button class="btn sm ghost" id="s-nologo">Retirer</button>' : ''}</div>
       <div><label class="f">Nom</label><input class="i" id="s-name" value="${esc(S.name)}"></div>
       <div class="grid2"><div><label class="f">Ville</label><input class="i" id="s-city" value="${esc(S.city)}"></div>
@@ -720,9 +722,9 @@ routes.settings = async () => {
     <div class="btns"><button class="btn" id="a-add">+ Ajouter un article</button><button class="btn primary" id="a-save">Enregistrer la grille</button></div>`);
   $('#s-logo', v).onchange = async (e) => {
     const f = e.target.files[0]; if (!f) return;
-    S.logo = await L.resizeImage(f, 400, 0.85); await L.saveSettings(S); toast('Logo enregistré'); routes.settings();
+    S.logo = await L.resizeImage(f, 600, 0.88); await db.kv('logoRemoved', false); await L.saveSettings(S); toast('Logo enregistré'); routes.settings();
   };
-  if ($('#s-nologo', v)) $('#s-nologo', v).onclick = async () => { S.logo = ''; await L.saveSettings(S); routes.settings(); };
+  if ($('#s-nologo', v)) $('#s-nologo', v).onclick = async () => { S.logo = ''; await db.kv('logoRemoved', true); await L.saveSettings(S); routes.settings(); };
   $('#s-save', v).onclick = async () => {
     const pin = $('#s-pin', v).value.trim();
     if (pin && pin.length < 4) { toast('Le code doit avoir au moins 4 chiffres', true); return; }
@@ -821,12 +823,24 @@ async function render() {
   catch (e) { console.error(e); view(`<div class="flash err">Erreur : ${esc(e.message)}</div>`); }
 }
 
+// Logo par défaut (fourni avec l'appli) tant qu'aucun autre n'est choisi dans Réglages.
+async function defaultLogo() {
+  try {
+    const blob = await (await fetch('img/logo.jpg')).blob();
+    return await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(''); r.readAsDataURL(blob); });
+  } catch (e) { return ''; }
+}
+
 async function boot() {
   S = await L.getSettings();
+  if (!S.logo && !(await db.kv('logoRemoved'))) {
+    const d = await defaultLogo();
+    if (d) { S.logo = d; if (await L.isInitialized()) await L.saveSettings(S); }
+  }
   await render();
 }
 
-window.addEventListener('hashchange', async () => { S = await L.getSettings(); render(); });
+window.addEventListener('hashchange', async () => { const logo = S && S.logo; S = await L.getSettings(); if (!S.logo && logo && !(await db.kv('logoRemoved'))) { S.logo = logo; if (await L.isInitialized()) await L.saveSettings(S); } render(); });
 // Bouton retour Android : revenir en arrière dans l'appli plutôt que la fermer.
 if (isNative && window.Capacitor.registerPlugin) {
   try {
