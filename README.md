@@ -21,6 +21,17 @@ Les mises à jour s'installent par-dessus l'ancienne version **sans perdre les d
 (même clé de signature : `android/app/smartpressing.keystore`, ne la supprimez pas).
 ⚠️ Désinstaller l'appli efface les données : faites d'abord une sauvegarde.
 
+## Version iPhone
+Adresse : **https://ori10.github.io/smart-pressing-app/** (publiée automatiquement à chaque envoi sur `main`).
+1. Sur l'iPhone, ouvrez cette adresse dans **Safari** (pas Chrome).
+2. Bouton Partager (carré avec une flèche) → **Sur l'écran d'accueil** → Ajouter.
+3. Ouvrez l'icône « Pressing » : l'appli s'ouvre en plein écran et fonctionne ensuite **sans internet**.
+4. Pour reprendre les données du téléphone Android : sur Android, Plus → Sauvegarde → envoyez le fichier à l'iPhone
+   (WhatsApp, AirDrop, e-mail) → enregistrez-le dans « Fichiers » ; sur l'iPhone, premier démarrage → « Restaurer une sauvegarde ».
+
+Chaque téléphone a **sa propre base** : ce qui est saisi sur l'iPhone n'apparaît pas sur l'Android (et inversement).
+N'ouvrez l'appli iPhone que depuis l'icône de l'écran d'accueil (les données de Safari et de l'icône sont séparées).
+
 ## Sauvegardes (important)
 Le téléphone est la seule copie. Menu **Plus → Sauvegarde → Créer et envoyer la sauvegarde** : envoyez le fichier `.json`
 sur votre WhatsApp, Google Drive ou par e-mail, **chaque semaine**. L'accueil affiche un rappel au bout de 7 jours.
