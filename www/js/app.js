@@ -1,4 +1,5 @@
 import { db } from './db.js';
+import { SEED } from './seed.js';
 import * as L from './logic.js';
 import { invoicePdf } from './pdf.js';
 import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
@@ -155,9 +156,9 @@ routes.welcome = async () => {
     <p class="muted">Toutes vos données restent dans ce téléphone.<br>Pas besoin d'internet.</p></div>
     <div class="card stack">
       <button class="btn primary big block" id="w-hist">Reprendre mes données</button>
-      <p class="small muted" style="margin:0">Réglages, ${'11'} articles et les factures déjà émises (N°19 et N°20).</p>
+      <p class="small muted" style="margin:0">Réglages et grille de ${SEED.articles.length} articles${SEED.orders.length ? ` + les factures déjà émises (N°${SEED.orders.map((o) => o.number).join(', N°')})` : ''}.</p>
       <button class="btn ghost block" id="w-empty">Démarrer avec seulement la grille de prix</button>
-      <label class="btn ghost block">Restaurer une sauvegarde…<input type="file" accept="application/json,.json" id="w-file" hidden></label>
+      <label class="btn ghost block">Restaurer une sauvegarde…<input type="file" accept=".json,application/json,text/plain" id="w-file" hidden></label>
     </div>`);
   $('#w-hist', v).onclick = async () => { await L.initialize(true); location.hash = '#/home'; boot(); };
   $('#w-empty', v).onclick = async () => { await L.initialize(false); location.hash = '#/home'; boot(); };
@@ -788,7 +789,7 @@ routes.backup = async () => {
     </div>
     <div class="card stack"><b>Restaurer</b>
       <p class="small muted" style="margin:0">Pour un nouveau téléphone : installez l'appli, puis choisissez le fichier de sauvegarde (.json).</p>
-      <label class="btn ghost block">Choisir un fichier de sauvegarde<input type="file" accept="application/json,.json" id="b-file" hidden></label></div>`);
+      <label class="btn ghost block">Choisir un fichier de sauvegarde<input type="file" accept=".json,application/json,text/plain" id="b-file" hidden></label></div>`);
   const make = async () => {
     const data = await L.exportAll();
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });

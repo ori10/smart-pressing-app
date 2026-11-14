@@ -1,0 +1,37 @@
+name: Publier la version iPhone (web)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Préparer le site
+        run: |
+          mkdir -p site && cp -r www/. site/
+          # Pas de factures de clients dans la version publiée sur internet
+          node -e "const fs=require('fs');const p='site/js/seed.js';let s=fs.readFileSync(p,'utf8');const d=JSON.parse(s.replace(/^export const SEED = /,'').replace(/;\s*$/,''));d.orders=[];fs.writeFileSync(p,'export const SEED = '+JSON.stringify(d)+';\n')"
+          sed -i "s/__BUILD__/${GITHUB_RUN_NUMBER}/" site/sw.js
+          touch site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
