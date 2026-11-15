@@ -70,6 +70,12 @@ Nouveau téléphone : installez l'appli → « Restaurer une sauvegarde ».
 - Factures : PDF à partager (WhatsApp) ou à imprimer depuis le lecteur PDF du téléphone.
 - Bibliothèques et police embarquées : rien ne dépend d'internet.
 
+## MonPressing (deuxième appli, avec IA)
+Le dossier `monpressing/` contient une deuxième application construite de la même façon, avec en plus l'IA (photo des
+vêtements, dictée, relances, assistant, détachage) et une sauvegarde chiffrée dans le bucket Supabase `saves`.
+Elle a sa propre APK (`MonPressing.apk`, versions `monpressing-v1.0.N` dans Releases) et s'installe à côté de Smart Pressing.
+Détails : [monpressing/README.md](monpressing/README.md).
+
 ## Structure
 ```
 www/               l'application (HTML + CSS + JavaScript sans framework)

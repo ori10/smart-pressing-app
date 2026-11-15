@@ -28,6 +28,9 @@ jobs:
           # Pas de factures de clients dans la version publiée sur internet
           node -e "const fs=require('fs');const p='site/js/seed.js';let s=fs.readFileSync(p,'utf8');const d=JSON.parse(s.replace(/^export const SEED = /,'').replace(/;\s*$/,''));d.orders=[];fs.writeFileSync(p,'export const SEED = '+JSON.stringify(d)+';\n')"
           sed -i "s/__BUILD__/${GITHUB_RUN_NUMBER}/" site/sw.js
+          # MonPressing : version iPhone à l'adresse …/smart-pressing-app/monpressing/
+          mkdir -p site/monpressing && cp -r monpressing/www/. site/monpressing/
+          sed -i "s/__BUILD__/${GITHUB_RUN_NUMBER}/" site/monpressing/sw.js
           touch site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

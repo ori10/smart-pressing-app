@@ -3,6 +3,8 @@ name: Construire l'APK
 on:
   push:
     branches: [main]
+    # MonPressing a sa propre compilation (apk-monpressing.yml)
+    paths-ignore: ["monpressing/**", ".github/workflows/apk-monpressing.yml"]
   workflow_dispatch:
 
 permissions:

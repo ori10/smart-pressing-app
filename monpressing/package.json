@@ -1,0 +1,20 @@
+{
+  "name": "monpressing",
+  "version": "1.0.0",
+  "description": "MonPressing : appli Android autonome avec IA (données dans le téléphone)",
+  "scripts": {
+    "serve": "npx http-server www -p 8081",
+    "sync": "npx cap sync android"
+  },
+  "private": true,
+  "dependencies": {
+    "@capacitor-community/speech-recognition": "^7.0.1",
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/app": "^7.1.2",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10",
+    "@capacitor/filesystem": "^7.1.9",
+    "@capacitor/local-notifications": "^7.0.7",
+    "@capacitor/share": "^7.0.4"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "appId": "com.monpressing.app",
+  "appName": "MonPressing",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "iconColor": "#0F5C4D"
+    }
+  }
+}
