@@ -735,8 +735,10 @@ export async function applyArrears(newOrder, { fromFiche = 0, fromInvoices = [] 
 }
 
 // ---------- messages WhatsApp ----------
+// Nom utilisé dans les messages : le prénom, sinon le nom.
 export function lastNameOf(o, reg) {
   const c = reg && reg.find((x) => x.id === o.clientId);
+  if (c && String(c.firstName || '').trim()) return String(c.firstName).trim().replace(/^./, (x) => x.toUpperCase());
   return c ? String(c.lastName || '').trim().toUpperCase() : o.clientName.trim().split(/\s+/)[0].toUpperCase();
 }
 export function readyMessage(o, reg, s) {

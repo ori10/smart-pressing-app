@@ -168,7 +168,7 @@ async function sendThanks(o, withCard = true) {
   const orders = await db.all('orders');
   const renewed = orders.filter((x) => x.clientId && x.clientId === o.clientId).length > 1;
   const text = L.thanksMessage(o, REG, S, renewed);
-  if (!withCard) return openWa(o, text);
+  if (!withCard) { const r = await openWa(o, text); o.thanksSentAt = L.nowIso(); await L.saveOrder(o); return r; }
   const blob = await thanksCard({ s: S, civ: L.civility(o.clientSex), name: L.lastNameOf(o, REG), renewed });
   const r = await waSendImage(blob, `Merci-${o.number}.png`, o.clientPhone, text, S);
   if (r !== 'cancelled') { o.thanksSentAt = L.nowIso(); await L.saveOrder(o); }
@@ -176,10 +176,11 @@ async function sendThanks(o, withCard = true) {
 }
 async function offerThanks(o) {
   if (!o.clientPhone) return;
-  const m = await ask({ title: 'Envoyer la carte de remerciement ?', ok: '💌 Carte + message', cancel: 'Plus tard',
-    body: `<p>Par WhatsApp à ${esc(o.clientName)}.</p><button class="btn ghost block" id="m-txt" type="button">Message seul (sans image)</button>`,
-    onOpen: (bg) => { $('#m-txt', bg).onclick = () => { bg.remove(); sendThanks(o, false); }; } });
-  if (m) await sendThanks(o, true);
+  const m = await ask({ title: 'Envoyer le remerciement ?', ok: '📲 Envoyer', cancel: 'Plus tard',
+    body: `<p>Le message s'ouvre directement dans la conversation WhatsApp de ${esc(o.clientName)}.</p>
+      <button class="btn ghost block" id="m-card" type="button">💌 Avec la carte en image (choisir la conversation)</button>`,
+    onOpen: (bg) => { $('#m-card', bg).onclick = () => { bg.remove(); sendThanks(o, true); }; } });
+  if (m) await sendThanks(o, false);
 }
 
 // ---------------------------------------------------------------- bilan mensuel automatique
@@ -592,7 +593,7 @@ routes.order = async (number) => {
     ${o.note ? `<div class="note" style="margin-bottom:12px">Remarque : ${esc(o.note)}</div>` : ''}
     ${(o.transfers || []).map((x) => `<div class="note" style="margin-bottom:12px">↪ Reste de ${money(x.amount)} reporté sur la <a href="#/order/${x.toOrder}">facture N°${x.toOrder}</a>.</div>`).join('')}
     ${o.washMode === 'maison' ? '<p class="small muted" style="margin:-4px 0 10px">🏠 Lavage maison (ne va pas chez le cousin)</p>' : ''}
-    ${o.status === STATUS.LIVRE && o.clientPhone ? `<button class="btn wa block" id="o-thanks" style="margin-bottom:12px">💌 ${o.thanksSentAt ? 'Renvoyer' : 'Envoyer'} la carte de remerciement</button>` : ''}
+    ${o.status === STATUS.LIVRE && o.clientPhone ? `<button class="btn wa block" id="o-thanks" style="margin-bottom:12px">💌 ${o.thanksSentAt ? 'Renvoyer' : 'Envoyer'} le remerciement</button>` : ''}
     <div class="btns" style="margin-bottom:12px">
       ${t.due > 0 ? `<button class="btn green" id="o-pay">Encaisser</button>` : ''}
       <button class="btn navy" id="o-share">Envoyer le PDF</button>
@@ -939,7 +940,7 @@ routes.client = async (id) => {
     if (needAdmin('client/' + c.id)) return;
     await L.setClientPrices(c.id, { [b.dataset.pdel]: null }); toast('Prix retiré'); routes.client(id);
   }; });
-  if ($('#cl-wa', v)) $('#cl-wa', v).onclick = () => waOpen(c.phone, `Bonjour ${L.civility(c.sex)} ${String(c.lastName).toUpperCase()},`, S);
+  if ($('#cl-wa', v)) $('#cl-wa', v).onclick = () => waOpen(c.phone, `Bonjour ${L.civility(c.sex)} ${String(c.firstName || '').trim() || String(c.lastName).toUpperCase()},`, S);
 };
 
 routes.promos = async () => {
