@@ -252,13 +252,14 @@ export async function nextNumber() {
   return Math.max(max + 1, Number(s.invoiceStart) || 1);
 }
 
-export async function createOrder({ clientId, clientSex, clientName, clientPhone, quantities, weighedKg, delivery, deliveryPlace, deliveryAt, dueAt, discount, deposit, arrears, homeOnly }) {
+export async function createOrder({ clientId, clientSex, clientName, clientPhone, quantities, prices = {}, weighedKg, delivery, deliveryPlace, deliveryAt, dueAt, discount, deposit, arrears, homeOnly }) {
   const s = await getSettings();
   const arts = await getArticles();
   const items = [];
   for (const a of arts) {
     const q = quantities[a.id] || 0;
-    if (q > 0) items.push({ name: a.name, qty: q, price: a.price, weight: a.weight, homeWash: !!(a.homeWash || homeOnly) });
+    const price = prices[a.id] != null && prices[a.id] !== '' ? Math.max(0, Math.round(Number(prices[a.id]))) : a.price;
+    if (q > 0) items.push({ name: a.name, qty: q, price, ...(price !== a.price ? { listPrice: a.price } : {}), weight: a.weight, homeWash: !!(a.homeWash || homeOnly) });
   }
   if (!clientName.trim()) throw new Error('Indiquez le nom du client.');
   if (!items.length && !(arrears && arrears.amount > 0)) throw new Error('Ajoutez au moins un article.');
@@ -743,4 +744,13 @@ export function readyMessage(o, reg, s) {
 }
 export function thanksMessage(o, reg, s, renewed) {
   return `Bonjour ${civility(o.clientSex)} ${lastNameOf(o, reg)},\nToute l'équipe ${s.name || 'Smart Pressing'} vous remercie pour votre confiance${renewed ? ' encore renouvelée' : ''}. Vos suggestions et critiques sont les bienvenues.`;
+}
+
+// ---------- prix spécifiques par client ----------
+export async function setClientPrices(clientId, changes) {
+  const list = await getClientsReg();
+  const c = list.find((x) => x.id === clientId); if (!c) return;
+  c.prices = { ...(c.prices || {}) };
+  for (const [id, v] of Object.entries(changes)) { if (v == null) delete c.prices[id]; else c.prices[id] = Math.max(0, Math.round(Number(v))); }
+  await saveClientsReg(list);
 }

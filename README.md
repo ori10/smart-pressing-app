@@ -40,6 +40,7 @@ N'ouvrez l'appli iPhone que depuis l'icône de l'écran d'accueil (les données 
   déroulante, et un nom inconnu crée la fiche à l'émission. Les clients des anciennes factures sont repris automatiquement.
 - **Arriéré** à la facture : l'appli propose l'ancien solde de la fiche et les restes des anciennes factures (reportés,
   donc jamais comptés deux fois) ou un montant libre. L'arriéré est hors chiffre d'affaires.
+- **Prix modifiables** à la facture (✎), avec « Retenir ce prix pour ce client » : appliqué tout seul ensuite.
 - **Lavage** par facture : chez le cousin ou à la maison (pas de coût, pas d'étape cousin).
 - **Promotions** (Plus → Promotions, admin) : %, F ou F par pièce ; toute la commande ou certains articles ; minimum,
   dates, jours de la semaine ; automatique ou au choix.

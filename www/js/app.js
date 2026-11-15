@@ -315,6 +315,9 @@ routes.new = async (_, q) => {
   const stats = L.clientsWithStats(reg, orders);
   const promos = (await L.getPromos()).filter((p) => L.promoActiveNow(p));
   const qty = {};
+  let prices = {};                   // prix modifiés pour cette facture (id article → prix)
+  const remember = {};               // prix à retenir pour le client
+  const priceOf = (a) => (prices[a.id] != null ? prices[a.id] : a.price);
   let client = null;                 // fiche choisie
   let known = { fiche: 0, invoices: [] };
   let loyaltyOn = true;
@@ -335,7 +338,7 @@ routes.new = async (_, q) => {
       <div class="seg" id="n-wash"><a class="on" data-w="cousin">🧺 Chez le cousin</a><a data-w="maison">🏠 Lavage maison</a></div>
       <p class="small muted" id="n-washinfo" style="margin:6px 0 0"></p></div>
     <div class="card" id="n-arts">${arts.map((a) => `<div class="art" data-id="${a.id}">
-        <div class="name">${esc(a.name)}<div class="price">${money(a.price)}${a.homeWash ? ' · lavage maison' : ''}</div></div>
+        <div class="name">${esc(a.name)}<div class="price"><button type="button" class="pedit" data-pedit="${a.id}"><span class="pv">${money(a.price)}</span> ✎</button>${a.homeWash ? ' · lavage maison' : ''}</div></div>
         <div class="qty"><button class="minus" data-d="-1">−</button><output>0</output><button class="plus" data-d="1">+</button></div></div>`).join('') || '<div class="empty">Aucun article actif : ajoutez-en dans Réglages.</div>'}</div>
     <div class="card stack">
       <div><label class="f">À rendre le</label><input class="i" id="n-due" type="datetime-local" value="${L.defaultDue(S.dueDays)}"></div>
@@ -364,11 +367,19 @@ routes.new = async (_, q) => {
   const washMode = () => $('#n-wash .on', v).dataset.w;
   let arrOpen = false;
   const arrState = { fiche: false, inv: {}, other: 0, note: '' };
-  const lines = () => arts.filter((a) => qty[a.id] > 0).map((a) => ({ articleId: a.id, qty: qty[a.id], price: a.price }));
+  const lines = () => arts.filter((a) => qty[a.id] > 0).map((a) => ({ articleId: a.id, qty: qty[a.id], price: priceOf(a) }));
+  const drawPrices = () => {
+    for (const a of arts) {
+      const row = $(`.art[data-id="${a.id}"]`, v); if (!row) continue;
+      const p = priceOf(a), changed = p !== a.price;
+      const fromClient = client && client.prices && client.prices[a.id] != null && client.prices[a.id] === p;
+      $('.pv', row).innerHTML = changed ? `<s class="muted">${money(a.price)}</s> <b class="pchg">${money(p)}</b>${fromClient ? ' <span class="badge blue">prix client</span>' : ''}` : money(a.price);
+    }
+  };
   const sums = () => {
     let items = 0, est = 0, n = 0;
     const home = washMode() === 'maison';
-    for (const a of arts) { const q2 = qty[a.id] || 0; items += q2 * a.price; if (!a.homeWash && !home) est += q2 * a.weight; n += q2; }
+    for (const a of arts) { const q2 = qty[a.id] || 0; items += q2 * priceOf(a); if (!a.homeWash && !home) est += q2 * a.weight; n += q2; }
     const deliv = $('#n-deliv', v).checked ? Number(S.deliveryFee) || 0 : 0;
     const cs = client && stats.find((x) => x.id === client.id);
     const reward = cs ? L.loyaltyReward(S, cs.orders.length, items) : null;
@@ -445,6 +456,8 @@ routes.new = async (_, q) => {
   };
   const choose = async (c) => {
     client = c; $('#n-list', v).classList.add('hidden'); $('#n-newc', v).classList.add('hidden');
+    prices = {}; for (const [id, p] of Object.entries(c.prices || {})) if (arts.find((a) => a.id === Number(id))) prices[id] = p;
+    drawPrices();
     const cs = stats.find((x) => x.id === c.id) || { orders: [], spent: 0, due: 0 };
     known = await L.knownArrears(c.id);
     const lp = L.loyaltyProgress(S, cs.orders.length);
@@ -453,7 +466,7 @@ routes.new = async (_, q) => {
       <br>${cs.orders.length ? `${cs.orders.length} commande(s) · ${money(cs.spent)} dépensés` : 'Aucune commande encore'}${cs.due + (c.arrears || 0) > 0 ? ` · <span style="color:var(--red)">doit ${money(cs.due + (c.arrears || 0))}</span>` : ''}
       ${lp ? `<br><span class="small">Fidélité : ${lp.left === 0 ? 'cette commande est récompensée 🎁' : `récompense dans ${lp.left + 1} commande(s)`}</span>` : ''}
       <br><a href="#" id="n-change" class="small">Changer de client</a></div>`;
-    $('#n-change', v).onclick = (e) => { e.preventDefault(); client = null; known = { fiche: 0, invoices: [] }; $('#n-chosen', v).innerHTML = ''; $('#n-client', v).value = ''; $('#n-client', v).focus(); showList(''); drawArrears(); recalc(); };
+    $('#n-change', v).onclick = (e) => { e.preventDefault(); client = null; known = { fiche: 0, invoices: [] }; prices = {}; drawPrices(); $('#n-chosen', v).innerHTML = ''; $('#n-client', v).value = ''; $('#n-client', v).focus(); showList(''); drawArrears(); recalc(); };
     if (cs.due + (c.arrears || 0) > 0 && !arrOpen) { arrOpen = true; }
     drawArrears(); recalc();
   };
@@ -476,7 +489,30 @@ routes.new = async (_, q) => {
   // --- reste du formulaire
   $('#n-wash', v).onclick = (e) => { const a = e.target.closest('[data-w]'); if (!a) return; $$('#n-wash a', v).forEach((x) => x.classList.toggle('on', x === a)); recalc(); };
   $('#n-arr-add', v).onclick = () => { arrOpen = true; drawArrears(); recalc(); };
-  $('#n-arts', v).addEventListener('click', (e) => {
+  $('#n-arts', v).addEventListener('click', async (e) => {
+    const pe = e.target.closest('[data-pedit]');
+    if (pe) {
+      const a = arts.find((x) => x.id === Number(pe.dataset.pedit));
+      if (S.adminPin && !unlocked && !(client && client.prices && client.prices[a.id] != null)) {
+        const m0 = await ask({ title: 'Code administrateur', ok: 'Valider', body: '<input class="i pin" id="m-pin" type="password" inputmode="numeric">' });
+        if (!m0) return;
+        if ($('#m-pin', m0).value !== S.adminPin) { toast('Code incorrect', true); return; }
+        unlocked = true;
+      }
+      const who = client ? L.clientDisplay(client) : ($('#n-newc', v).classList.contains('hidden') ? '' : 'ce nouveau client');
+      const m = await ask({ title: `Prix : ${a.name}`, ok: 'Appliquer',
+        body: `<p class="small muted" style="margin:0 0 8px">Prix normal : ${money(a.price)}</p>
+          <input class="i" id="m-price" type="number" inputmode="numeric" min="0" value="${priceOf(a)}">
+          ${who ? `<label class="check"><input type="checkbox" id="m-keep" ${client && client.prices && client.prices[a.id] != null ? 'checked' : ''}> Retenir ce prix pour ${esc(who)}</label>` : '<p class="small muted">Choisissez le client pour pouvoir retenir ce prix.</p>'}
+          ${prices[a.id] != null ? '<button class="btn sm ghost" id="m-reset" type="button">Remettre le prix normal</button>' : ''}`,
+        onOpen: (bg) => { const r = $('#m-reset', bg); if (r) r.onclick = () => { $('#m-price', bg).value = a.price; }; } });
+      if (!m) return;
+      const val = Math.max(0, Math.round(Number($('#m-price', m).value) || 0));
+      if (val === a.price) delete prices[a.id]; else prices[a.id] = val;
+      const keep = $('#m-keep', m);
+      if (keep) remember[a.id] = keep.checked ? (val === a.price ? null : val) : (client && client.prices && client.prices[a.id] != null ? null : undefined);
+      drawPrices(); recalc(); return;
+    }
     const b = e.target.closest('button[data-d]'); if (!b) return;
     const row = b.closest('.art'); const id = Number(row.dataset.id);
     qty[id] = Math.max(0, (qty[id] || 0) + Number(b.dataset.d));
@@ -503,13 +539,15 @@ routes.new = async (_, q) => {
     const labels = [...s.promoList.filter((x) => promoOn[x.p.id]).map((x) => x.p.name), ...(s.loyal ? [s.reward.label] : []), ...(s.manual ? ['Remise'] : [])];
     const arrNotes = [s.arrFiche ? 'ancien solde' : '', ...known.invoices.filter((x) => arrOpen && arrState.inv[x.number]).map((x) => `reste N°${x.number}`), s.arrOther ? (arrState.note.trim() || 'autre') : ''].filter(Boolean);
     const o = await L.createOrder({
-      clientId: c.id, clientSex: c.sex, clientName: L.clientDisplay(c), clientPhone: c.phone, quantities: qty,
+      clientId: c.id, clientSex: c.sex, clientName: L.clientDisplay(c), clientPhone: c.phone, quantities: qty, prices,
       weighedKg: washMode() === 'maison' ? '' : $('#n-kg', v).value, delivery: $('#n-deliv', v).checked,
       deliveryPlace: $('#n-place', v).value, deliveryAt: $('#n-at', v).value, dueAt: $('#n-due', v).value,
       discount: s.discount ? { amount: s.discount, label: labels.join(' + ') } : null,
       arrears: s.arrears ? { amount: s.arrears, note: arrNotes.join(', ') } : null,
       homeOnly: washMode() === 'maison', deposit: $('#n-dep', v).value,
     });
+    const keep = Object.fromEntries(Object.entries(remember).filter(([, x]) => x !== undefined));
+    if (Object.keys(keep).length) await L.setClientPrices(c.id, keep);
     if (s.arrears) await L.applyArrears(o, { fromFiche: s.arrFiche, fromInvoices: known.invoices.filter((x) => arrState.inv[x.number]).map((x) => x.number) });
     toast(`Facture N°${o.number} émise`);
     location.hash = `#/order/${o.number}`;
@@ -541,7 +579,7 @@ routes.order = async (number) => {
         <span class="badge ${t.due <= 0 ? (t.transferred && t.paid < t.total ? 'blue' : 'green') : t.paid ? 'orange' : 'red'}">${t.due <= 0 ? (t.transferred && t.paid < t.total ? 'Reportée' : 'Payé') : t.paid ? 'Acompte' : 'Impayé'}</span></div>
       ${steps(o)}
       <div class="inv-lines">
-        ${o.items.map((i) => `<div class="l"><span>${i.qty} × ${esc(i.name)}</span><span>${money(i.qty * i.price)}</span></div>`).join('')}
+        ${o.items.map((i) => `<div class="l"><span>${i.qty} × ${esc(i.name)}${i.listPrice ? ` <span class="small muted">(${money(i.price)} au lieu de ${money(i.listPrice)})</span>` : ''}</span><span>${money(i.qty * i.price)}</span></div>`).join('')}
         ${o.deliveryFee ? `<div class="l"><span>Livraison</span><span>${money(o.deliveryFee)}</span></div>` : ''}
         ${t.discount ? `<div class="l"><span>${esc((o.discount && o.discount.label) || 'Remise')}</span><span>− ${money(t.discount)}</span></div>` : ''}
         ${t.arrears ? `<div class="l"><span>Arriéré${o.arrears.note ? ' (' + esc(o.arrears.note) + ')' : ''}</span><span>${money(t.arrears)}</span></div>` : ''}
@@ -874,6 +912,7 @@ routes.client = async (id) => {
   setTop({ title: 'Fiche client', back: '#/clients', right: c ? `<a class="pill" href="#/clientform/${c.id}" style="text-decoration:none">Modifier</a>` : '' });
   if (!c) { view('<div class="empty">Client introuvable.</div>'); return; }
   const lp = L.loyaltyProgress(S, c.orders.length);
+  const artsAll = await L.getArticles();
   const fav = {};
   for (const o of c.orders) for (const i of o.items) fav[i.name] = (fav[i.name] || 0) + i.qty;
   const favs = Object.entries(fav).sort((a, b) => b[1] - a[1]).slice(0, 4);
@@ -891,9 +930,15 @@ routes.client = async (id) => {
       <a class="btn primary" href="#/new?cid=${c.id}">+ Nouvelle facture</a>
       ${c.phone ? `<button class="btn wa" id="cl-wa">WhatsApp</button>` : '<span></span>'}
     </div>
+    ${Object.keys(c.prices || {}).length ? `<div class="card"><h3 class="ch-title">💲 Prix spécifiques</h3><div class="calc">${Object.entries(c.prices).map(([id, p]) => { const a = artsAll.find((x) => x.id === Number(id)); return a ? `<div class="l"><span>${esc(a.name)} <s class="muted small">${money(a.price)}</s></span><span><b>${money(p)}</b> <button class="btn sm danger" data-pdel="${id}" style="min-height:30px;padding:2px 8px">✕</button></span></div>` : ''; }).join('')}</div>
+      <p class="small muted" style="margin:6px 0 0">Pour ajouter un prix : à la facture, touchez ✎ à côté du prix et cochez « Retenir ».</p></div>` : ''}
     ${favs.length ? `<div class="card"><h3 class="ch-title">Ce qu'il confie le plus</h3>${Charts.hbars(favs, (n) => n + ' pcs')}</div>` : ''}
     ${c.orders.length ? `<h2>Historique</h2>${c.orders.slice().reverse().map((o) => orderCard(o, { showAction: false })).join('')}` : ''}`);
   Charts.enableTips(v);
+  $$('[data-pdel]', v).forEach((b) => { b.onclick = async () => {
+    if (needAdmin('client/' + c.id)) return;
+    await L.setClientPrices(c.id, { [b.dataset.pdel]: null }); toast('Prix retiré'); routes.client(id);
+  }; });
   if ($('#cl-wa', v)) $('#cl-wa', v).onclick = () => waOpen(c.phone, `Bonjour ${L.civility(c.sex)} ${String(c.lastName).toUpperCase()},`, S);
 };
 
