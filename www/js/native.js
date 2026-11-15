@@ -134,3 +134,20 @@ export async function waSendImage(blob, filename, phone, text, s) {
   openExternal(`https://wa.me/${num}?text=${encodeURIComponent(text)}`);
   return 'link';
 }
+
+// Notification « relances à faire » : une seule, programmée à la prochaine échéance (à l'heure choisie).
+export async function scheduleReminderNotif(when, count, hour = 10) {
+  if (!Notif) return false;
+  try {
+    await Notif.cancel({ notifications: [{ id: 102 }] });
+    if (!when) return true;
+    const perm = await Notif.checkPermissions();
+    if (perm.display !== 'granted') { const p2 = await Notif.requestPermissions(); if (p2.display !== 'granted') return false; }
+    const at = new Date(when); at.setHours(hour, 0, 0, 0);
+    if (at <= new Date()) at.setDate(at.getDate() + 1);
+    await Notif.schedule({ notifications: [{ id: 102, title: 'Relances à faire',
+      body: count > 1 ? `${count} clients ont un solde impayé à relancer.` : 'Un client a un solde impayé à relancer.',
+      schedule: { at, allowWhileIdle: true } }] });
+    return true;
+  } catch (e) { return false; }
+}

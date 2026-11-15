@@ -5,7 +5,7 @@ import { invoicePdf, ticketPdf } from './pdf.js';
 import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
 import * as Charts from './charts.js';
 import * as Cloud from './cloud.js';
-import { shareFile, saveFile, openExternal, waNumber, isNative, scheduleMonthlyReminder, waOpen, waSendImage } from './native.js';
+import { shareFile, saveFile, openExternal, waNumber, isNative, scheduleMonthlyReminder, waOpen, waSendImage, scheduleReminderNotif } from './native.js';
 import { thanksCard } from './card.js';
 import { beep } from './scan.js';
 
@@ -183,6 +183,45 @@ async function offerThanks(o) {
   if (m) await sendThanks(o, false);
 }
 
+// ---------------------------------------------------------------- relances des impayés
+let remindQueue = [];
+function reminderRow(g) {
+  return `<div class="rem-row" data-rk="${esc(g.key)}"><div class="grow"><b>${esc(g.name)}</b>
+      <div class="small muted">${money(g.total)} · ${g.items.map((x) => 'N°' + x.number).join(', ')}${g.count ? ` · déjà ${g.count} relance(s)` : ''}</div></div>
+    <button class="btn wa sm" data-remind="${esc(g.key)}">Relancer</button><button class="x" data-rsnooze="${esc(g.key)}" aria-label="Plus tard">✕</button></div>`;
+}
+async function sendReminder(g) {
+  await L.markReminded(g);
+  await waOpen(g.phone, L.reminderMessage(g, S), S);
+}
+async function bindReminders(root, plan, after) {
+  // onclick (et non addEventListener) : l'écran est réutilisé, un seul gestionnaire à la fois.
+  root.onclick = async (e) => {
+    const b = e.target.closest('[data-remind]'), sn = e.target.closest('[data-rsnooze]'), all = e.target.closest('[data-remind-all]');
+    if (b) { const g = plan.due.find((x) => x.key === b.dataset.remind); if (g) { await sendReminder(g); after(); } }
+    if (sn) {
+      const g = plan.due.find((x) => x.key === sn.dataset.rsnooze); if (!g) return;
+      await L.markReminded(g, Number(S.remindEvery) || 7); toast(`${g.name} : relance reportée`); after();
+    }
+    if (all) { remindQueue = plan.due.slice(1); await sendReminder(plan.due[0]); after(); }
+  };
+}
+// En revenant de WhatsApp, proposer le client suivant de la file.
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden || !remindQueue.length) return;
+  await new Promise((r) => setTimeout(r, 500));
+  const g = remindQueue[0];
+  const ok = await ask({ title: `Relancer ${g.name} ?`, text: `${money(g.total)} dus · encore ${remindQueue.length} client(s) dans la file.`, ok: '📲 Relancer', cancel: 'Arrêter' });
+  if (!ok) { remindQueue = []; render(); return; }
+  remindQueue.shift();
+  await sendReminder(g);
+  render();
+});
+async function refreshReminderNotif(plan) {
+  if (!isNative) return;
+  scheduleReminderNotif(plan.due.length ? new Date() : plan.nextAt, plan.due.length || 1, Number(S.remindHour) || 10);
+}
+
 // ---------------------------------------------------------------- bilan mensuel automatique
 async function reportBlob(p, fmt) {
   const b = L.computeBilan(await db.all('orders'), await db.all('expenses'), p, S);
@@ -262,6 +301,8 @@ routes.home = async () => {
     if (days === null || days >= 7) backupNote = `<a href="#/backup" class="note" style="display:block;text-decoration:none;margin-bottom:12px">⚠️ ${days === null ? 'Aucune sauvegarde faite.' : `Dernière sauvegarde il y a ${days} jours.`} Toutes les données sont dans ce téléphone : faites une sauvegarde.</a>`;
   }
   const reports = await L.pendingReports(S);
+  const plan = L.reminderPlan(await db.all('orders'), REG, S);
+  refreshReminderNotif(plan);
   const reportCards = reports.map((p) => isAdmin()
     ? `<div class="card report" data-rk="${p.kind}:${p.offset}"><div class="row between"><b>📊 Bilan ${p.kind === 'year' ? 'de l’' + p.label.toLowerCase() : 'de ' + p.label.toLowerCase()} prêt</b><button class="x" data-mr="later" aria-label="Plus tard">✕</button></div>
         <p class="small muted" style="margin:4px 0 10px">${isNative ? 'Une copie est rangée dans Documents/SmartPressing/Bilans. ' : ''}Envoyez-le en un toucher (WhatsApp, e-mail…).</p>
@@ -274,6 +315,9 @@ routes.home = async () => {
     <p class="muted" style="margin:4px 0 14px">${fmtDate(L.todayIso(), false)} · ${c.open} commande(s) en cours</p>
     ${backupNote}
     ${reportCards}
+    ${plan.due.length ? `<div class="card rem"><div class="row between"><b>💬 Relances à faire (${plan.due.length})</b><a class="small" href="#/reminders">Tout voir</a></div>
+      ${plan.due.slice(0, 3).map(reminderRow).join('')}
+      ${plan.due.length > 1 ? `<button class="btn wa block" data-remind-all style="margin-top:10px">📲 Relancer tout le monde (${plan.due.length})</button>` : ''}</div>` : ''}
     <a class="btn primary big block" href="#/new" style="margin-bottom:14px">+ Nouvelle facture</a>
     ${c.late.length ? `<div class="card edge late"><b style="color:var(--red)">⏰ ${c.late.length} commande(s) en retard</b>${c.late.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)}</span><span>promis ${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
     ${c.soon.length ? `<div class="card edge orange"><b style="color:#a65200">À rendre dans les 24 h : ${c.soon.length}</b>${c.soon.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)} · ${STATUS_LABEL[o.status]}</span><span>${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
@@ -304,6 +348,7 @@ routes.home = async () => {
     };
   });
   archiveReports(reports);
+  bindReminders(hv, plan, () => routes.home());
 };
 
 routes.new = async (_, q) => {
@@ -602,6 +647,7 @@ routes.order = async (number) => {
       ${o.clientPhone ? `<button class="btn" id="o-wa">WhatsApp</button>` : ''}
       <button class="btn" id="o-claim">⚠️ Réclamation</button>
     </div>
+    ${o.status === STATUS.LIVRE && t.due > 0 && o.clientPhone ? `<div class="card row between"><div class="small">💬 ${(o.reminders || []).length ? `${o.reminders.length} relance(s), dernière le ${fmtDate(o.reminders[o.reminders.length - 1].at)}` : 'Pas encore relancé'}</div><button class="btn wa sm" id="o-remind">Relancer</button></div>` : ''}
     ${(o.payments || []).length ? `<div class="card"><h2 style="margin-top:0">Paiements</h2><div class="calc">${o.payments.map((p) => `<div class="l"><span>${fmtDate(p.at)}${p.note ? ' · ' + esc(p.note) : ''}</span><span>${money(p.amount)}</span></div>`).join('')}</div>
       ${isAdmin() ? `<button class="btn sm ghost" id="o-unpay" style="margin-top:8px">Annuler les paiements</button>` : ''}</div>` : ''}
     ${claims.length ? `<h2>Réclamations</h2>${claims.map((c) => claimCard(o, c)).join('')}` : ''}
@@ -626,6 +672,11 @@ routes.order = async (number) => {
   if (act) $('#o-act', v).onclick = (e) => busy(e.currentTarget, () => runAction(o.number, reload));
   if ($('#o-ready', v)) $('#o-ready', v).onclick = () => openWa(o, waReady(o));
   if ($('#o-thanks', v)) $('#o-thanks', v).onclick = () => offerThanks(o);
+  if ($('#o-remind', v)) $('#o-remind', v).onclick = async () => {
+    const reg = REG.find((c) => c.id === o.clientId);
+    const g = { key: 'o' + o.number, clientId: o.clientId, phone: o.clientPhone, sex: o.clientSex, name: o.clientName, first: reg, total: t.due, count: (o.reminders || []).length, items: [{ number: o.number, due: t.due, date: o.createdAt }] };
+    await sendReminder(g); reload();
+  };
   const pdfName = `Facture-${o.number}-${fileSafe(o.clientName)}.pdf`;
   $('#o-share', v).onclick = (e) => busy(e.currentTarget, async () => {
     const blob = await invoicePdf(o, S);
@@ -1011,6 +1062,21 @@ routes.promoform = async (id) => {
   };
 };
 
+routes.reminders = async () => {
+  setNav('more');
+  setTop({ title: 'Relances des impayés', back: '#/more' });
+  const orders = await db.all('orders');
+  const plan = L.reminderPlan(orders, REG, S);
+  const later = orders.filter((o) => o.status === STATUS.LIVRE && orderTotals(o).due > 0 && !plan.due.some((g) => g.items.some((x) => x.number === o.number)));
+  const v = view(`<p class="small muted" style="margin:0 0 10px">Relance ${S.remindAfter} jours après la livraison, puis tous les ${S.remindEvery} jours, ${S.remindMax} fois au maximum (Réglages). Un toucher ouvre WhatsApp avec le message prêt.</p>
+    ${S.remindOn === false ? '<div class="note" style="margin-bottom:12px">Les relances sont désactivées dans Réglages.</div>' : ''}
+    <div class="card rem">${plan.due.map(reminderRow).join('') || '<p class="muted" style="margin:0">Personne à relancer aujourd’hui. 👍</p>'}
+      ${plan.due.length > 1 ? `<button class="btn wa block" data-remind-all style="margin-top:10px">📲 Relancer tout le monde (${plan.due.length})</button>` : ''}</div>
+    ${plan.due[0] ? `<h2>Exemple de message</h2><div class="card small" style="white-space:pre-wrap">${esc(L.reminderMessage(plan.due[0], S))}</div>` : ''}
+    ${later.length ? `<h2>Autres impayés livrés (${later.length})</h2><div class="card calc">${later.map((o) => { const n = (o.reminders || []).length; return `<a class="l" href="#/order/${o.number}" style="color:inherit;text-decoration:none"><span>N°${o.number} · ${esc(o.clientName)}<br><span class="small muted">${n >= S.remindMax ? `${n} relances faites (maximum atteint)` : n ? `${n} relance(s), prochaine bientôt` : 'pas encore à relancer'}</span></span><span>${money(orderTotals(o).due)}</span></a>`; }).join('')}</div>` : ''}`);
+  bindReminders(v, plan, () => routes.reminders());
+};
+
 routes.claims = async (_, q) => {
   setNav('more');
   setTop({ title: 'Réclamations', back: '#/more' });
@@ -1063,6 +1129,7 @@ routes.more = async () => {
       <a href="#/clients"><span class="ic">👥</span>Clients</a>
       <a href="#/promos"><span class="ic">🏷️</span>Promotions${lock()}</a>
       <a href="#/claims"><span class="ic">⚠️</span>Réclamations</a>
+      <a href="#/reminders"><span class="ic">💬</span>Relances des impayés</a>
       <a href="#/cousin"><span class="ic">🧺</span>Compte du cousin${lock()}</a>
       <a href="#/orders?s=all"><span class="ic">🧾</span>Toutes les factures</a>
       <a href="#/bilan"><span class="ic">📊</span>Bilan${lock()}</a>
@@ -1262,6 +1329,12 @@ routes.settings = async () => {
         <div><label class="f">Premier N° de facture</label><input class="i" id="s-start" type="number" value="${S.invoiceStart}"></div></div>
       <div class="grid2"><div><label class="f">Délai de rendu (jours)</label><input class="i" id="s-due" type="number" min="0" value="${S.dueDays}"></div><div></div></div>
       <label class="check"><input type="checkbox" id="s-mr" ${S.monthlyReport !== false ? 'checked' : ''}> 📊 Bilan mensuel automatique (le 1er du mois${isNative ? ', avec notification à 9 h' : ''})</label>
+      <b style="margin-top:6px">💬 Relances des impayés</b>
+      <label class="check"><input type="checkbox" id="s-rem" ${S.remindOn !== false ? 'checked' : ''}> Proposer les relances WhatsApp</label>
+      <div class="grid2"><div><label class="f">1re relance après (jours, depuis la livraison)</label><input class="i" id="s-rafter" type="number" min="1" value="${S.remindAfter}"></div>
+        <div><label class="f">Puis tous les (jours)</label><input class="i" id="s-revery" type="number" min="1" value="${S.remindEvery}"></div></div>
+      <div class="grid2"><div><label class="f">Nombre maximum de relances</label><input class="i" id="s-rmax" type="number" min="1" value="${S.remindMax}"></div>
+        <div><label class="f">Heure de la notification</label><input class="i" id="s-rhour" type="number" min="6" max="21" value="${S.remindHour}"></div></div>
       <a class="btn ghost block" href="#/promos">🏷️ Gérer les promotions (remises, 10 % dès 5 000 F…)</a>
       <b style="margin-top:6px">💬 WhatsApp</b>
       <div class="grid2"><div><label class="f">Envoyer avec</label><select class="i" id="s-waapp"><option value="business" ${S.waApp !== 'normal' ? 'selected' : ''}>WhatsApp Business</option><option value="normal" ${S.waApp === 'normal' ? 'selected' : ''}>WhatsApp</option></select></div>
@@ -1299,6 +1372,8 @@ routes.settings = async () => {
       loyaltyValue: Math.max(0, Number($('#s-lval', v).value) || 0), loyaltyType: $('#s-ltype', v).value,
       monthlyReport: $('#s-mr', v).checked,
       waApp: $('#s-waapp', v).value, waBusinessPhone: $('#s-wanum', v).value.trim(),
+      remindOn: $('#s-rem', v).checked, remindAfter: Math.max(1, Number($('#s-rafter', v).value) || 7), remindEvery: Math.max(1, Number($('#s-revery', v).value) || 7),
+      remindMax: Math.max(1, Number($('#s-rmax', v).value) || 3), remindHour: Math.min(21, Math.max(6, Number($('#s-rhour', v).value) || 10)),
     });
     if (pin) unlocked = true;
     await L.saveSettings(S); toast('Réglages enregistrés');

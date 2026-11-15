@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   cousinRate: 400, deliveryFee: 500, savingsPercent: 25, invoiceStart: 1, adminPin: '',
   dueDays: 2, loyaltyEvery: 10, loyaltyType: 'percent', loyaltyValue: 20, monthlyReport: true,
   volumeMin: 5000, volumePercent: 10, waApp: 'business', waBusinessPhone: '0161084250',
+  remindOn: true, remindAfter: 7, remindEvery: 7, remindMax: 3, remindHour: 10,
 };
 
 // ---------- formatage ----------
@@ -755,4 +756,62 @@ export async function setClientPrices(clientId, changes) {
   c.prices = { ...(c.prices || {}) };
   for (const [id, v] of Object.entries(changes)) { if (v == null) delete c.prices[id]; else c.prices[id] = Math.max(0, Math.round(Number(v))); }
   await saveClientsReg(list);
+}
+
+// ---------- relances des impayés ----------
+const DAY = 864e5;
+const isoAddDays = (iso, d) => { const t = new Date(iso.slice(0, 19)); t.setTime(t.getTime() + d * DAY); return t; };
+export function deliveredAt(o) {
+  const e = (o.events || []).filter((x) => x.status === STATUS.LIVRE).pop();
+  return e ? e.at : null;
+}
+// Pour chaque facture livrée avec un reste : quand faut-il la relancer ?
+function orderReminder(o, s) {
+  const t = orderTotals(o);
+  const at = deliveredAt(o);
+  if (o.status !== STATUS.LIVRE || t.due <= 0 || !at || !o.clientPhone) return null;
+  const sent = (o.reminders || []);
+  if (sent.length >= (Number(s.remindMax) || 3)) return { o, t, done: true };
+  const last = sent.length ? sent[sent.length - 1].at : null;
+  let next = last ? isoAddDays(last, Number(s.remindEvery) || 7) : isoAddDays(at, Number(s.remindAfter) || 7);
+  if (o.remindSnooze) { const sn = new Date(o.remindSnooze + 'T00:00:00'); if (sn > next) next = sn; }
+  return { o, t, next, count: sent.length };
+}
+// Clients à relancer maintenant (un message par client, toutes ses factures dues), et prochaine échéance.
+export function reminderPlan(orders, reg, s, now = new Date()) {
+  const groups = new Map(); let nextAt = null;
+  if (s.remindOn === false) return { due: [], nextAt: null };
+  for (const o of orders) {
+    const r = orderReminder(o, s); if (!r || r.done) continue;
+    if (r.next <= now) {
+      const k = o.clientId ? 'c' + o.clientId : 'tel:' + phoneKey(o.clientPhone);
+      const g = groups.get(k) || { key: k, clientId: o.clientId, phone: o.clientPhone, sex: o.clientSex, name: o.clientName, items: [], total: 0, count: 0 };
+      g.items.push({ number: o.number, due: r.t.due, date: o.createdAt }); g.total += r.t.due; g.count = Math.max(g.count, r.count);
+      groups.set(k, g);
+    } else if (!nextAt || r.next < nextAt) nextAt = r.next;
+  }
+  const due = [...groups.values()].map((g) => ({ ...g, items: g.items.sort((a, b) => a.number - b.number), first: (reg || []).find((c) => c.id === g.clientId) }))
+    .sort((a, b) => b.total - a.total);
+  return { due, nextAt };
+}
+export function reminderMessage(g, s) {
+  const c = g.first;
+  const name = c ? (String(c.firstName || '').trim() ? String(c.firstName).trim().replace(/^./, (x) => x.toUpperCase()) : String(c.lastName || '').toUpperCase()) : g.name.split(/\s+/)[0];
+  const civ = civility(c ? c.sex : g.sex);
+  const inv = g.items.length === 1
+    ? `sur votre facture N°${g.items[0].number} du ${fmtDate(g.items[0].date, false).slice(0, 5)}`
+    : `sur vos factures ${g.items.map((x) => 'N°' + x.number).join(', ').replace(/, ([^,]*)$/, ' et $1')}`;
+  return `Bonjour ${civ} ${name}, nous espérons que vous allez bien. Sauf erreur de notre part, il reste un solde de ${money(g.total)} ${inv}. Vous pouvez le régler à votre prochain passage ou par Mobile Money. Merci pour votre confiance ! — ${s.name || 'Smart Pressing'}`;
+}
+export async function markReminded(g, skipDays = 0) {
+  for (const it of g.items) {
+    const o = await getOrder(it.number); if (!o) continue;
+    if (skipDays) { const d = new Date(Date.now() + skipDays * DAY); o.remindSnooze = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+    else {
+      o.reminders = o.reminders || [];
+      o.reminders.push({ at: nowIso(), amount: it.due });
+      o.events.push({ status: o.status, note: `Relance WhatsApp n°${o.reminders.length} (${money(it.due)})`, at: nowIso() });
+    }
+    await saveOrder(o);
+  }
 }

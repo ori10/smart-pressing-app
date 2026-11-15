@@ -44,6 +44,8 @@ N'ouvrez l'appli iPhone que depuis l'icône de l'écran d'accueil (les données 
 - **Lavage** par facture : chez le cousin ou à la maison (pas de coût, pas d'étape cousin).
 - **Promotions** (Plus → Promotions, admin) : %, F ou F par pièce ; toute la commande ou certains articles ; minimum,
   dates, jours de la semaine ; automatique ou au choix.
+- **Relances des impayés** : 7 jours après la livraison, puis tous les 7 jours (3 fois max), carte « Relances à faire » +
+  notification Android à 10 h ; un toucher ouvre WhatsApp Business avec le message poli (un message par client).
 - **WhatsApp Business** : « Monsieur/Madame NOM, vos habits sont prêts. Pouvons-nous passer ? » et, après la livraison,
   carte de remerciement en image. Sur Android, la conversation du client s'ouvre directement dans WhatsApp Business.
 
