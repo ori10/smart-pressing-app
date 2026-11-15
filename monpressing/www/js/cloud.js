@@ -65,17 +65,23 @@ async function upload(c, path, body) {
   });
   await check(res, 'Envoi');
 }
+// MonPressing liste ses sauvegardes et aussi celles de Smart Pressing (même bucket, dossier « smartpressing »).
+const SOURCES = [[PREFIX, 'MonPressing'], ['smartpressing', 'Smart Pressing']];
 export async function listBackups(c) {
-  const res = await fetch(`${base(c)}/storage/v1/object/list/${BUCKET}`, {
-    method: 'POST', headers: headers(c, { 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ prefix: PREFIX, limit: 100, offset: 0, sortBy: { column: 'name', order: 'desc' } }),
-  });
-  await check(res, 'Lecture');
-  return (await res.json()).filter((f) => /^sauvegarde-\d{4}-\d{2}-\d{2}\.json$/.test(f.name)).map((f) => ({ name: f.name, date: f.name.slice(11, 21), size: f.metadata && f.metadata.size }))
-    .sort((a, b) => b.name.localeCompare(a.name));
+  const out = [];
+  for (const [prefix, app] of SOURCES) {
+    const res = await fetch(`${base(c)}/storage/v1/object/list/${BUCKET}`, {
+      method: 'POST', headers: headers(c, { 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ prefix, limit: 100, offset: 0, sortBy: { column: 'name', order: 'desc' } }),
+    });
+    await check(res, 'Lecture');
+    for (const f of await res.json()) if (/^sauvegarde-\d{4}-\d{2}-\d{2}\.json$/.test(f.name)) out.push({ name: `${prefix}/${f.name}`, app, date: f.name.slice(11, 21), size: f.metadata && f.metadata.size });
+  }
+  return out.sort((a, b) => b.date.localeCompare(a.date) || a.app.localeCompare(b.app));
 }
 async function download(c, name) {
-  const res = await fetch(`${base(c)}/storage/v1/object/${BUCKET}/${PREFIX}/${name}`, { headers: headers(c) });
+  const path = name.includes('/') ? name : `${PREFIX}/${name}`;
+  const res = await fetch(`${base(c)}/storage/v1/object/${BUCKET}/${path}`, { headers: headers(c) });
   await check(res, 'Téléchargement');
   return res.text();
 }

@@ -1665,8 +1665,8 @@ async function pickAndRestore(c, after) {
   try { list = await Cloud.listBackups(c); } catch (e) { toast(e.message, true); return; }
   if (!list.length) { toast('Aucune sauvegarde en ligne trouvée.', true); return; }
   const m = await ask({ title: 'Restaurer depuis internet', ok: 'Restaurer', danger: true,
-    body: `<label class="f">Sauvegarde</label><select class="i" id="m-file">${list.map((f) => `<option value="${f.name}">${fmtDate(f.date, false)}${f.size ? ` · ${Math.round(f.size / 1024)} Ko` : ''}</option>`).join('')}</select>
-      <p class="small muted" style="margin-top:8px">Les données actuelles de ce téléphone seront remplacées.</p>` });
+    body: `<label class="f">Sauvegarde</label><select class="i" id="m-file">${list.map((f) => `<option value="${f.name}">${f.app ? f.app + ' · ' : ''}${fmtDate(f.date, false)}${f.size ? ` · ${Math.round(f.size / 1024)} Ko` : ''}</option>`).join('')}</select>
+      <p class="small muted" style="margin-top:8px">Les données actuelles de ce téléphone seront remplacées. Pour une sauvegarde Smart Pressing, le mot de passe est celui de Smart Pressing.</p>` });
   if (!m) return;
   try { await Cloud.restoreFromCloud(c, $('#m-file', m).value, c.password); toast('Données restaurées'); after && after(); }
   catch (e) { toast(e.message, true); }
