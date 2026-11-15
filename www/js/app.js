@@ -5,7 +5,8 @@ import { invoicePdf, ticketPdf } from './pdf.js';
 import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
 import * as Charts from './charts.js';
 import * as Cloud from './cloud.js';
-import { shareFile, saveFile, openExternal, waNumber, isNative, scheduleMonthlyReminder } from './native.js';
+import { shareFile, saveFile, openExternal, waNumber, isNative, scheduleMonthlyReminder, waOpen, waSendImage } from './native.js';
+import { thanksCard } from './card.js';
 import { beep } from './scan.js';
 
 const { STATUS, STATUS_LABEL, STATUS_TONE, money, fmtDate, fmtShort, orderTotals, pieceCode, orderCode } = L;
@@ -17,6 +18,7 @@ let S = null;            // réglages en cache
 let unlocked = false;    // mode administrateur déverrouillé (jusqu'à fermeture de l'appli)
 let cleanup = null;      // fonction appelée en quittant un écran
 let connected = false;   // on passe par l'écran « Bienvenue » à chaque ouverture de l'appli
+let REG = [];            // fiches clients en cache
 const isAdmin = () => !S.adminPin || unlocked;
 
 // ---------------------------------------------------------------- outils d'affichage
@@ -155,18 +157,30 @@ async function deliverFlow(o, cashedChecked = null) {
   }
   await L.advance(o, STATUS.LIVRE, cash ? '' : 'Livré non soldé');
   toast(`N°${o.number} livrée`);
+  await offerThanks(o);
   return true;
 }
 
-// Message « linge prêt » en un toucher.
-function waReady(o) {
-  const t = orderTotals(o);
-  let msg = `Bonjour ${o.clientName}, votre linge est prêt chez ${S.name} (facture N°${o.number}, ${t.pieces} pièce(s)).`;
-  msg += t.due > 0 ? ` Reste à payer : ${money(t.due)}.` : ' Tout est déjà réglé.';
-  msg += o.deliveryFee || o.deliveryPlace ? ' Nous vous le livrons comme prévu.' : ' Vous pouvez passer le récupérer.';
-  return msg + ' Merci !';
+// Message « vos habits sont prêts » (Monsieur/Madame selon la fiche) et carte de remerciement.
+function waReady(o) { return L.readyMessage(o, REG, S); }
+function openWa(o, text) { return waOpen(o.clientPhone, text, S); }
+async function sendThanks(o, withCard = true) {
+  const orders = await db.all('orders');
+  const renewed = orders.filter((x) => x.clientId && x.clientId === o.clientId).length > 1;
+  const text = L.thanksMessage(o, REG, S, renewed);
+  if (!withCard) return openWa(o, text);
+  const blob = await thanksCard({ s: S, civ: L.civility(o.clientSex), name: L.lastNameOf(o, REG), renewed });
+  const r = await waSendImage(blob, `Merci-${o.number}.png`, o.clientPhone, text, S);
+  if (r !== 'cancelled') { o.thanksSentAt = L.nowIso(); await L.saveOrder(o); }
+  return r;
 }
-function openWa(o, text) { openExternal(`https://wa.me/${waNumber(o.clientPhone)}?text=${encodeURIComponent(text)}`); }
+async function offerThanks(o) {
+  if (!o.clientPhone) return;
+  const m = await ask({ title: 'Envoyer la carte de remerciement ?', ok: '💌 Carte + message', cancel: 'Plus tard',
+    body: `<p>Par WhatsApp à ${esc(o.clientName)}.</p><button class="btn ghost block" id="m-txt" type="button">Message seul (sans image)</button>`,
+    onOpen: (bg) => { $('#m-txt', bg).onclick = () => { bg.remove(); sendThanks(o, false); }; } });
+  if (m) await sendThanks(o, true);
+}
 
 // ---------------------------------------------------------------- bilan mensuel automatique
 async function reportBlob(p, fmt) {
@@ -296,93 +310,172 @@ routes.new = async (_, q) => {
   const number = await L.nextNumber();
   setTop({ title: 'Nouvelle facture', right: `<span class="pill">N°${number}</span>` });
   const arts = await L.getArticles(true);
-  const allOrders = await db.all('orders');
+  const orders = await db.all('orders');
+  const reg = await L.getClientsReg();
+  const stats = L.clientsWithStats(reg, orders);
+  const promos = (await L.getPromos()).filter((p) => L.promoActiveNow(p));
   const qty = {};
-  let client = null;          // client reconnu (fiche)
+  let client = null;                 // fiche choisie
+  let known = { fiche: 0, invoices: [] };
   let loyaltyOn = true;
-  let volumeOn = true;
+  const promoOn = Object.fromEntries(promos.map((p) => [p.id, !!p.auto]));
   const v = view(`<div class="card">
-      <div class="grid2">
-        <div><label class="f">Nom du client</label><input class="i" id="n-name" autocomplete="off" autocapitalize="words" value="${esc(q.get('name') || '')}"></div>
-        <div><label class="f">Téléphone</label><input class="i" id="n-phone" type="tel" inputmode="tel" autocomplete="off" value="${esc(q.get('phone') || '')}"></div>
-      </div>
-      <div id="n-sugg"></div>
-      <div id="n-client"></div></div>
+      <label class="f">Client</label>
+      <div class="combo"><input class="i" id="n-client" placeholder="Choisir ou écrire un nom…" autocomplete="off" autocapitalize="words"><button class="combo-btn" id="n-open" type="button" aria-label="Liste">▾</button></div>
+      <div id="n-list" class="sugg hidden"></div>
+      <div id="n-chosen"></div>
+      <div id="n-newc" class="hidden stack newc">
+        <b class="small" style="color:var(--blue)">Nouveau client : il sera ajouté à vos clients</b>
+        <div class="grid2"><div><label class="f">Nom</label><input class="i" id="nc-last" autocapitalize="characters"></div>
+          <div><label class="f">Prénom</label><input class="i" id="nc-first" autocapitalize="words"></div></div>
+        <div class="seg sex" id="nc-sex"><a data-sex="M">Monsieur</a><a data-sex="F">Madame</a></div>
+        <div><label class="f">Numéro WhatsApp</label><input class="i" id="nc-phone" type="tel" inputmode="tel"></div>
+      </div></div>
+    <div class="card"><label class="f">Lavage</label>
+      <div class="seg" id="n-wash"><a class="on" data-w="cousin">🧺 Chez le cousin</a><a data-w="maison">🏠 Lavage maison</a></div>
+      <p class="small muted" id="n-washinfo" style="margin:6px 0 0"></p></div>
     <div class="card" id="n-arts">${arts.map((a) => `<div class="art" data-id="${a.id}">
         <div class="name">${esc(a.name)}<div class="price">${money(a.price)}${a.homeWash ? ' · lavage maison' : ''}</div></div>
         <div class="qty"><button class="minus" data-d="-1">−</button><output>0</output><button class="plus" data-d="1">+</button></div></div>`).join('') || '<div class="empty">Aucun article actif : ajoutez-en dans Réglages.</div>'}</div>
     <div class="card stack">
       <div><label class="f">À rendre le</label><input class="i" id="n-due" type="datetime-local" value="${L.defaultDue(S.dueDays)}"></div>
-      <div><label class="f">Poids pesé (kg) — facultatif</label><input class="i" id="n-kg" type="number" inputmode="decimal" step="0.1" min="0" placeholder="estimé : 0 kg"></div>
+      <div id="n-kgbox"><label class="f">Poids pesé (kg) — facultatif</label><input class="i" id="n-kg" type="number" inputmode="decimal" step="0.1" min="0" placeholder="estimé : 0 kg"></div>
       <label class="check"><input type="checkbox" id="n-deliv"> Livraison (+${money(S.deliveryFee)})</label>
       <div id="n-dbox" class="hidden stack">
         <div><label class="f">Lieu de livraison</label><input class="i" id="n-place"></div>
         <div><label class="f">Date et heure de livraison</label><input class="i" id="n-at" type="datetime-local"></div>
       </div>
-      <div id="n-loyal"></div>
+      <div id="n-promos"></div>
+      <div id="n-arrbox">
+        <button class="btn sm ghost" id="n-arr-add" type="button">+ Ajouter un arriéré (ancien solde)</button>
+        <div id="n-arr" class="hidden stack arr"></div>
+      </div>
       <div class="grid2">
-        <div><label class="f">Remise (F) — facultatif</label><input class="i" id="n-disc" type="number" inputmode="numeric" min="0" placeholder="0"></div>
+        <div><label class="f">Remise libre (F)</label><input class="i" id="n-disc" type="number" inputmode="numeric" min="0" placeholder="0"></div>
         <div><label class="f">Payé maintenant (F)</label><input class="i" id="n-dep" type="number" inputmode="numeric" min="0" placeholder="0 = rien"></div>
       </div>
       <div class="row" style="gap:6px"><button class="btn sm ghost" id="n-full" type="button">Tout payé</button><span class="small muted" id="n-rest"></span></div>
     </div>
     <div class="totalbar">
-      <div class="row between"><span>Total client</span><span class="big" id="n-total">0 F</span></div>
+      <div class="row between"><span>À payer</span><span class="big" id="n-total">0 F</span></div>
       <div class="small" id="n-admin" style="opacity:.85"></div>
       <button class="btn primary big block" id="n-go" style="margin-top:10px">Émettre la facture</button>
     </div>`);
+  const washMode = () => $('#n-wash .on', v).dataset.w;
+  let arrOpen = false;
+  const arrState = { fiche: false, inv: {}, other: 0, note: '' };
+  const lines = () => arts.filter((a) => qty[a.id] > 0).map((a) => ({ articleId: a.id, qty: qty[a.id], price: a.price }));
   const sums = () => {
     let items = 0, est = 0, n = 0;
-    for (const a of arts) { const q2 = qty[a.id] || 0; items += q2 * a.price; if (!a.homeWash) est += q2 * a.weight; n += q2; }
+    const home = washMode() === 'maison';
+    for (const a of arts) { const q2 = qty[a.id] || 0; items += q2 * a.price; if (!a.homeWash && !home) est += q2 * a.weight; n += q2; }
     const deliv = $('#n-deliv', v).checked ? Number(S.deliveryFee) || 0 : 0;
-    const reward = client ? L.loyaltyReward(S, client.orders.length, items) : (null);
+    const cs = client && stats.find((x) => x.id === client.id);
+    const reward = cs ? L.loyaltyReward(S, cs.orders.length, items) : null;
     const loyal = reward && loyaltyOn ? reward.amount : 0;
-    const volReward = L.volumeReward(S, items);
-    const vol = volReward && volumeOn ? volReward.amount : 0;
+    const ls = lines();
+    const promoList = promos.map((p) => ({ p, amount: L.promoAmount(p, ls, items) })).filter((x) => x.amount > 0);
+    const promoSum = promoList.filter((x) => promoOn[x.p.id]).reduce((a, x) => a + x.amount, 0);
     const manual = Math.max(0, Math.round(Number($('#n-disc', v).value) || 0));
-    const discount = Math.min(items + deliv, loyal + vol + manual);
-    return { items, est, n, deliv, reward, loyal, volReward, vol, manual, discount, total: items + deliv - discount };
+    const discount = Math.min(items + deliv, loyal + promoSum + manual);
+    const arrFiche = arrOpen && arrState.fiche ? known.fiche : 0;
+    const arrInv = arrOpen ? known.invoices.filter((x) => arrState.inv[x.number]).reduce((a, x) => a + x.due, 0) : 0;
+    const arrOther = arrOpen ? Math.max(0, Math.round(arrState.other || 0)) : 0;
+    const arrears = arrFiche + arrInv + arrOther;
+    const sales = items + deliv - discount;
+    return { items, est, n, deliv, reward, loyal, promoList, promoSum, manual, discount, sales, arrFiche, arrInv, arrOther, arrears, total: sales + arrears };
+  };
+  const drawPromos = (s) => {
+    const html = s.promoList.map((x) => `<label class="check loyal"><input type="checkbox" data-promo="${x.p.id}" ${promoOn[x.p.id] ? 'checked' : ''}> 🏷️ ${esc(x.p.name)} : −${money(x.amount)}</label>`).join('')
+      + (s.reward ? `<label class="check loyal"><input type="checkbox" id="n-loyal-on" ${loyaltyOn ? 'checked' : ''}> 🎁 ${esc(s.reward.label)} : −${money(s.reward.amount)}</label>` : '');
+    const box = $('#n-promos', v);
+    if (box.dataset.h !== html) { box.innerHTML = html; box.dataset.h = html; }
+  };
+  const drawArrears = () => {
+    const box = $('#n-arr', v);
+    $('#n-arr-add', v).classList.toggle('hidden', arrOpen);
+    box.classList.toggle('hidden', !arrOpen);
+    if (!arrOpen) return;
+    const opts = [];
+    if (known.fiche > 0) opts.push(`<label class="check"><input type="checkbox" data-arr="fiche" ${arrState.fiche ? 'checked' : ''}> Ancien solde de la fiche : <b>${money(known.fiche)}</b></label>`);
+    for (const x of known.invoices) opts.push(`<label class="check"><input type="checkbox" data-arr="inv" data-n="${x.number}" ${arrState.inv[x.number] ? 'checked' : ''}> Reste de la facture N°${x.number} : <b>${money(x.due)}</b></label>`);
+    box.innerHTML = `<div class="row between"><b>Arriéré</b><button class="btn sm ghost" id="n-arr-x" type="button">Retirer</button></div>
+      ${client ? (opts.length ? `<p class="small muted" style="margin:0">Montants connus pour ce client :</p>${opts.join('')}` : '<p class="small muted" style="margin:0">Aucun ancien solde connu pour ce client.</p>') : '<p class="small muted" style="margin:0">Choisissez d’abord le client pour voir ses montants connus.</p>'}
+      <div class="grid2"><div><label class="f">Autre montant (F)</label><input class="i" id="n-arr-other" type="number" inputmode="numeric" min="0" value="${arrState.other || ''}" placeholder="0"></div>
+        <div><label class="f">Note</label><input class="i" id="n-arr-note" value="${esc(arrState.note)}" placeholder="ex. facture papier n°45"></div></div>`;
+    $('#n-arr-x', v).onclick = () => { arrOpen = false; drawArrears(); recalc(); };
+    $$('[data-arr]', box).forEach((cb) => { cb.onchange = () => {
+      if (cb.dataset.arr === 'fiche') arrState.fiche = cb.checked; else arrState.inv[cb.dataset.n] = cb.checked;
+      recalc();
+    }; });
+    $('#n-arr-other', v).oninput = (e) => { arrState.other = Number(e.target.value) || 0; recalc(); };
+    $('#n-arr-note', v).oninput = (e) => { arrState.note = e.target.value; };
   };
   const recalc = () => {
     const s = sums();
     const kgv = $('#n-kg', v).value;
-    const washKg = kgv !== '' ? Number(kgv) : s.est;
+    const home = washMode() === 'maison';
+    const washKg = home ? 0 : kgv !== '' ? Number(kgv) : s.est;
     const wash = Math.round(washKg * S.cousinRate);
     $('#n-kg', v).placeholder = `estimé : ${L.kg(s.est)}`;
+    $('#n-kgbox', v).classList.toggle('hidden', home);
+    $('#n-washinfo', v).textContent = home ? 'Rien n’ira chez le cousin : pas de coût de lavage, pas de vérification au retour.' : 'Les articles « lavage maison » restent ici ; le reste part chez le cousin.';
     $('#n-total', v).textContent = money(s.total);
-    $('#n-admin', v).textContent = (s.n ? `${s.n} pièce(s)` : '') + (s.discount ? ` · remise ${money(s.discount)}` : '') + (isAdmin() && s.n ? ` · Lavage ${money(wash)} · marge ${money(s.total - wash)}` : '');
-    $('#n-loyal', v).innerHTML = (s.volReward ? `<label class="check loyal"><input type="checkbox" id="n-vol-on" ${volumeOn ? 'checked' : ''}> 💰 ${esc(s.volReward.label)} : −${money(s.volReward.amount)}</label>` : '')
-      + (s.reward ? `<label class="check loyal" style="margin-top:6px"><input type="checkbox" id="n-loyal-on" ${loyaltyOn ? 'checked' : ''}> 🎁 ${esc(s.reward.label)} : −${money(s.reward.amount)}</label>` : '');
-    if ($('#n-loyal-on', v)) $('#n-loyal-on', v).onchange = (e) => { loyaltyOn = e.target.checked; recalc(); };
-    if ($('#n-vol-on', v)) $('#n-vol-on', v).onchange = (e) => { volumeOn = e.target.checked; recalc(); };
+    $('#n-admin', v).textContent = [s.n ? `${s.n} pièce(s)` : '', s.discount ? `remise ${money(s.discount)}` : '', s.arrears ? `dont arriéré ${money(s.arrears)}` : '',
+      isAdmin() && s.n ? `lavage ${money(wash)} · marge ${money(s.sales - wash)}` : ''].filter(Boolean).join(' · ');
+    drawPromos(s);
     const dep = Math.round(Number($('#n-dep', v).value) || 0);
     $('#n-rest', v).textContent = s.total ? (dep >= s.total ? 'Facture soldée' : dep > 0 ? `Reste à payer : ${money(s.total - dep)}` : 'Rien payé pour l’instant') : '';
   };
-  const showClient = () => {
-    const box = $('#n-client', v);
-    if (!client) { box.innerHTML = ''; return; }
-    const lp = L.loyaltyProgress(S, client.orders.length);
-    box.innerHTML = `<a class="client-chip" href="#/client/${encodeURIComponent(client.key)}">
-      <b>★ Client connu : ${client.orders.length} commande(s)</b> · ${money(client.spent)} dépensés${client.due > 0 ? ` · <span style="color:var(--red)">doit ${money(client.due)}</span>` : ''}
-      ${lp ? `<br><span class="small">Fidélité : ${lp.left === 0 ? 'cette commande est récompensée 🎁' : `récompense dans ${lp.left + 1} commande(s)`}</span>` : ''}</a>`;
+  $('#n-promos', v).addEventListener('change', (e) => {
+    if (e.target.id === 'n-loyal-on') loyaltyOn = e.target.checked;
+    if (e.target.dataset.promo) promoOn[e.target.dataset.promo] = e.target.checked;
+    recalc();
+  });
+  // --- client : liste déroulante / nouveau client
+  const sorted = stats.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const showList = (text) => {
+    const t = (text || '').trim().toLowerCase(), d = t.replace(/\D/g, '');
+    const list = sorted.filter((c) => !t || c.name.toLowerCase().includes(t) || (c.firstName || '').toLowerCase().includes(t) || (d.length >= 3 && (c.phone || '').replace(/\D/g, '').includes(d))).slice(0, 60);
+    const box = $('#n-list', v);
+    box.innerHTML = list.map((c) => `<button type="button" data-cid="${c.id}"><b>${esc(c.name)}</b> <span class="muted">${esc(c.phone || '')}${c.orders.length ? ` · ${c.orders.length} cmd` : ''}</span></button>`).join('')
+      + (t ? `<button type="button" data-cid="new" class="newbtn">➕ Nouveau client « ${esc(text.trim())} »</button>` : '')
+      + (!list.length && !t ? '<div class="small muted" style="padding:10px">Aucun client enregistré : écrivez un nom.</div>' : '');
+    box.classList.remove('hidden');
   };
-  const matchClient = () => {
-    const name = $('#n-name', v).value.trim().toLowerCase(), phone = L.phoneKey($('#n-phone', v).value);
-    const list = L.listClients(allOrders);
-    client = (phone && list.find((c) => c.key === 'tel:' + phone)) || (!phone && name && list.find((c) => c.key === 'nom:' + name)) || null;
-    showClient(); recalc();
+  const choose = async (c) => {
+    client = c; $('#n-list', v).classList.add('hidden'); $('#n-newc', v).classList.add('hidden');
+    const cs = stats.find((x) => x.id === c.id) || { orders: [], spent: 0, due: 0 };
+    known = await L.knownArrears(c.id);
+    const lp = L.loyaltyProgress(S, cs.orders.length);
+    $('#n-client', v).value = L.clientDisplay(c);
+    $('#n-chosen', v).innerHTML = `<div class="client-chip"><b>${esc(L.civility(c.sex))} ${esc(L.clientDisplay(c))}</b>${c.phone ? ' · ' + esc(c.phone) : ''}
+      <br>${cs.orders.length ? `${cs.orders.length} commande(s) · ${money(cs.spent)} dépensés` : 'Aucune commande encore'}${cs.due + (c.arrears || 0) > 0 ? ` · <span style="color:var(--red)">doit ${money(cs.due + (c.arrears || 0))}</span>` : ''}
+      ${lp ? `<br><span class="small">Fidélité : ${lp.left === 0 ? 'cette commande est récompensée 🎁' : `récompense dans ${lp.left + 1} commande(s)`}</span>` : ''}
+      <br><a href="#" id="n-change" class="small">Changer de client</a></div>`;
+    $('#n-change', v).onclick = (e) => { e.preventDefault(); client = null; known = { fiche: 0, invoices: [] }; $('#n-chosen', v).innerHTML = ''; $('#n-client', v).value = ''; $('#n-client', v).focus(); showList(''); drawArrears(); recalc(); };
+    if (cs.due + (c.arrears || 0) > 0 && !arrOpen) { arrOpen = true; }
+    drawArrears(); recalc();
   };
-  const suggest = async (text) => {
-    const box = $('#n-sugg', v);
-    const found = await L.findClients(text);
-    box.innerHTML = found.length ? `<div class="sugg">${found.map((c, i) => `<button type="button" data-i="${i}"><b>${esc(c.name)}</b> <span class="muted">${esc(c.phone)} · ${c.orders.length} cmd</span></button>`).join('')}</div>` : '';
-    $$('[data-i]', box).forEach((b) => { b.onclick = () => {
-      const c = found[Number(b.dataset.i)];
-      $('#n-name', v).value = c.name; $('#n-phone', v).value = c.phone; box.innerHTML = ''; matchClient();
-    }; });
+  const startNew = (text) => {
+    client = null; known = { fiche: 0, invoices: [] };
+    $('#n-list', v).classList.add('hidden'); $('#n-chosen', v).innerHTML = '';
+    const parts = text.trim().split(/\s+/);
+    $('#nc-last', v).value = (parts[0] || '').toUpperCase(); $('#nc-first', v).value = parts.slice(1).join(' ');
+    $('#n-newc', v).classList.remove('hidden'); drawArrears(); recalc();
   };
-  $('#n-name', v).oninput = (e) => { suggest(e.target.value); matchClient(); };
-  $('#n-phone', v).oninput = (e) => { suggest(e.target.value); matchClient(); };
+  $('#n-client', v).oninput = (e) => { client = null; $('#n-chosen', v).innerHTML = ''; showList(e.target.value); };
+  $('#n-client', v).onfocus = (e) => { if (!client) showList(e.target.value); };
+  $('#n-open', v).onclick = () => { const box = $('#n-list', v); if (box.classList.contains('hidden')) showList(client ? '' : $('#n-client', v).value); else box.classList.add('hidden'); };
+  $('#n-list', v).onclick = (e) => {
+    const b = e.target.closest('[data-cid]'); if (!b) return;
+    if (b.dataset.cid === 'new') startNew($('#n-client', v).value);
+    else choose(reg.find((c) => c.id === Number(b.dataset.cid)));
+  };
+  $('#nc-sex', v).onclick = (e) => { const a = e.target.closest('[data-sex]'); if (!a) return; $$('#nc-sex a', v).forEach((x) => x.classList.toggle('on', x === a)); };
+  // --- reste du formulaire
+  $('#n-wash', v).onclick = (e) => { const a = e.target.closest('[data-w]'); if (!a) return; $$('#n-wash a', v).forEach((x) => x.classList.toggle('on', x === a)); recalc(); };
+  $('#n-arr-add', v).onclick = () => { arrOpen = true; drawArrears(); recalc(); };
   $('#n-arts', v).addEventListener('click', (e) => {
     const b = e.target.closest('button[data-d]'); if (!b) return;
     const row = b.closest('.art'); const id = Number(row.dataset.id);
@@ -396,22 +489,33 @@ routes.new = async (_, q) => {
   $('#n-deliv', v).onchange = () => { $('#n-dbox', v).classList.toggle('hidden', !$('#n-deliv', v).checked); recalc(); };
   $('#n-at', v).onchange = () => { if ($('#n-at', v).value) $('#n-due', v).value = $('#n-at', v).value; };
   $('#n-go', v).onclick = (e) => busy(e.currentTarget, async () => {
+    let c = client;
+    if (!c) {
+      if ($('#n-newc', v).classList.contains('hidden')) {
+        if ($('#n-client', v).value.trim()) { startNew($('#n-client', v).value); throw new Error('Complétez la fiche du nouveau client.'); }
+        throw new Error('Choisissez le client.');
+      }
+      const sexA = $('#nc-sex a.on', v);
+      if (!sexA) throw new Error('Choisissez Monsieur ou Madame.');
+      c = await L.saveClient({ lastName: $('#nc-last', v).value, firstName: $('#nc-first', v).value, sex: sexA.dataset.sex, phone: $('#nc-phone', v).value });
+    }
     const s = sums();
-    const labels = [];
-    if (s.vol) labels.push(s.volReward.label);
-    if (s.loyal) labels.push(s.reward.label);
-    if (s.manual) labels.push('Remise');
+    const labels = [...s.promoList.filter((x) => promoOn[x.p.id]).map((x) => x.p.name), ...(s.loyal ? [s.reward.label] : []), ...(s.manual ? ['Remise'] : [])];
+    const arrNotes = [s.arrFiche ? 'ancien solde' : '', ...known.invoices.filter((x) => arrOpen && arrState.inv[x.number]).map((x) => `reste N°${x.number}`), s.arrOther ? (arrState.note.trim() || 'autre') : ''].filter(Boolean);
     const o = await L.createOrder({
-      clientName: $('#n-name', v).value, clientPhone: $('#n-phone', v).value, quantities: qty,
-      weighedKg: $('#n-kg', v).value, delivery: $('#n-deliv', v).checked,
+      clientId: c.id, clientSex: c.sex, clientName: L.clientDisplay(c), clientPhone: c.phone, quantities: qty,
+      weighedKg: washMode() === 'maison' ? '' : $('#n-kg', v).value, delivery: $('#n-deliv', v).checked,
       deliveryPlace: $('#n-place', v).value, deliveryAt: $('#n-at', v).value, dueAt: $('#n-due', v).value,
       discount: s.discount ? { amount: s.discount, label: labels.join(' + ') } : null,
-      deposit: $('#n-dep', v).value,
+      arrears: s.arrears ? { amount: s.arrears, note: arrNotes.join(', ') } : null,
+      homeOnly: washMode() === 'maison', deposit: $('#n-dep', v).value,
     });
+    if (s.arrears) await L.applyArrears(o, { fromFiche: s.arrFiche, fromInvoices: known.invoices.filter((x) => arrState.inv[x.number]).map((x) => x.number) });
     toast(`Facture N°${o.number} émise`);
     location.hash = `#/order/${o.number}`;
   });
-  if (q.get('name') || q.get('phone')) matchClient();
+  if (q.get('cid')) { const c = reg.find((x) => x.id === Number(q.get('cid'))); if (c) await choose(c); }
+  drawArrears();
   recalc();
 };
 
@@ -432,14 +536,15 @@ routes.order = async (number) => {
     ${act ? `<button class="btn primary big block" id="o-act" style="margin-bottom:12px">${esc(act.label)}</button>` : ''}
     ${L.lateness(o) === 'late' ? `<div class="alert" style="margin-bottom:12px">⏰ En retard : promis pour le ${fmtShort(due)}.</div>` : ''}
     <div class="card">
-      <div class="row between"><div><a href="#/client/${encodeURIComponent(L.clientKey(o))}" style="color:inherit;text-decoration:none"><b style="font-size:1.1rem">${esc(o.clientName)} ›</b></a>
+      <div class="row between"><div><a href="${o.clientId ? '#/client/' + o.clientId : '#/clients'}" style="color:inherit;text-decoration:none"><b style="font-size:1.1rem">${esc(o.clientName)} ›</b></a>
         <div class="small muted">${o.clientPhone ? `<a href="tel:${esc(o.clientPhone)}">${esc(o.clientPhone)}</a> · ` : ''}${fmtDate(o.createdAt)}</div></div>
-        <span class="badge ${t.due <= 0 ? 'green' : t.paid ? 'orange' : 'red'}">${t.due <= 0 ? 'Payé' : t.paid ? 'Acompte' : 'Impayé'}</span></div>
+        <span class="badge ${t.due <= 0 ? (t.transferred && t.paid < t.total ? 'blue' : 'green') : t.paid ? 'orange' : 'red'}">${t.due <= 0 ? (t.transferred && t.paid < t.total ? 'Reportée' : 'Payé') : t.paid ? 'Acompte' : 'Impayé'}</span></div>
       ${steps(o)}
       <div class="inv-lines">
         ${o.items.map((i) => `<div class="l"><span>${i.qty} × ${esc(i.name)}</span><span>${money(i.qty * i.price)}</span></div>`).join('')}
         ${o.deliveryFee ? `<div class="l"><span>Livraison</span><span>${money(o.deliveryFee)}</span></div>` : ''}
         ${t.discount ? `<div class="l"><span>${esc((o.discount && o.discount.label) || 'Remise')}</span><span>− ${money(t.discount)}</span></div>` : ''}
+        ${t.arrears ? `<div class="l"><span>Arriéré${o.arrears.note ? ' (' + esc(o.arrears.note) + ')' : ''}</span><span>${money(t.arrears)}</span></div>` : ''}
         <div class="l total"><span>Total</span><span>${money(t.total)}</span></div>
         ${t.paid > 0 && t.due > 0 ? `<div class="l"><span>Déjà payé</span><span>${money(t.paid)}</span></div><div class="l total" style="color:var(--red)"><span>Reste à payer</span><span>${money(t.due)}</span></div>` : ''}
       </div>
@@ -447,6 +552,9 @@ routes.order = async (number) => {
       ${o.deliveryPlace || o.deliveryAt ? `<p class="small" style="margin:4px 0 0">🚚 ${esc(o.deliveryPlace || 'Lieu à préciser')}${o.deliveryAt ? ' · ' + fmtShort(o.deliveryAt) : ''}</p>` : ''}
     </div>
     ${o.note ? `<div class="note" style="margin-bottom:12px">Remarque : ${esc(o.note)}</div>` : ''}
+    ${(o.transfers || []).map((x) => `<div class="note" style="margin-bottom:12px">↪ Reste de ${money(x.amount)} reporté sur la <a href="#/order/${x.toOrder}">facture N°${x.toOrder}</a>.</div>`).join('')}
+    ${o.washMode === 'maison' ? '<p class="small muted" style="margin:-4px 0 10px">🏠 Lavage maison (ne va pas chez le cousin)</p>' : ''}
+    ${o.status === STATUS.LIVRE && o.clientPhone ? `<button class="btn wa block" id="o-thanks" style="margin-bottom:12px">💌 ${o.thanksSentAt ? 'Renvoyer' : 'Envoyer'} la carte de remerciement</button>` : ''}
     <div class="btns" style="margin-bottom:12px">
       ${t.due > 0 ? `<button class="btn green" id="o-pay">Encaisser</button>` : ''}
       <button class="btn navy" id="o-share">Envoyer le PDF</button>
@@ -478,6 +586,7 @@ routes.order = async (number) => {
   const reload = () => routes.order(number);
   if (act) $('#o-act', v).onclick = (e) => busy(e.currentTarget, () => runAction(o.number, reload));
   if ($('#o-ready', v)) $('#o-ready', v).onclick = () => openWa(o, waReady(o));
+  if ($('#o-thanks', v)) $('#o-thanks', v).onclick = () => offerThanks(o);
   const pdfName = `Facture-${o.number}-${fileSafe(o.clientName)}.pdf`;
   $('#o-share', v).onclick = (e) => busy(e.currentTarget, async () => {
     const blob = await invoicePdf(o, S);
@@ -656,7 +765,7 @@ routes.verify = async (number, q, stage) => {
   $('#v-ok', v).onclick = (e) => busy(e.currentTarget, async () => {
     await L.advance(o, stage === 'cousin' ? STATUS.A_REPASSER : STATUS.PRET);
     toast(stage === 'cousin' ? 'Transmis au repassage' : 'Commande prête');
-    if (stage === 'final' && o.clientPhone && await ask({ title: 'Prévenir le client ?', text: `Envoyer « votre linge est prêt » à ${o.clientName} par WhatsApp.`, ok: '📲 WhatsApp', cancel: 'Plus tard' })) openWa(o, waReady(o));
+    if (stage === 'final' && o.clientPhone && await ask({ title: 'Prévenir le client ?', text: `« ${waReady(o).split('\n')[0]} »`, ok: '📲 WhatsApp', cancel: 'Plus tard' })) openWa(o, waReady(o));
     location.hash = `#/order/${o.number}`;
   });
   draw();
@@ -712,56 +821,148 @@ routes.deliveries = async () => {
 
 routes.clients = async (_, q) => {
   setNav('more');
-  setTop({ title: 'Clients', back: '#/more' });
-  const sort = q.get('t') || 'spent';
-  const all = L.listClients(await db.all('orders'));
-  const sorters = { spent: (a, b) => b.spent - a.spent, recent: (a, b) => b.lastAt.localeCompare(a.lastAt), due: (a, b) => b.due - a.due, count: (a, b) => b.orders.length - a.orders.length };
+  setTop({ title: 'Clients', back: '#/more', right: '<a class="pill" href="#/clientform" style="text-decoration:none">+ Ajouter</a>' });
+  const sort = q.get('t') || 'name';
+  const all = L.clientsWithStats(await L.getClientsReg(), await db.all('orders'));
+  const sorters = { name: (a, b) => a.name.localeCompare(b.name), spent: (a, b) => b.spent - a.spent, recent: (a, b) => b.lastAt.localeCompare(a.lastAt), due: (a, b) => b.totalDue - a.totalDue, count: (a, b) => b.orders.length - a.orders.length };
   const v = view(`<input class="i" id="c-q" placeholder="Chercher un nom ou un numéro" autocomplete="off" style="margin-bottom:10px">
-    <div class="chips">${[['spent', 'Meilleurs clients'], ['recent', 'Récents'], ['count', 'Plus fidèles'], ['due', 'Qui doivent']].map(([k, l]) => `<a class="chip ${k === sort ? 'on' : ''}" href="#/clients?t=${k}">${l}</a>`).join('')}</div>
+    <div class="chips">${[['name', 'A → Z'], ['spent', 'Meilleurs clients'], ['recent', 'Récents'], ['count', 'Plus fidèles'], ['due', 'Qui doivent']].map(([k, l]) => `<a class="chip ${k === sort ? 'on' : ''}" href="#/clients?t=${k}">${l}</a>`).join('')}</div>
     <p class="small muted" style="margin:0 0 8px">${all.length} client(s)</p>
     <div id="c-list"></div>`);
   const draw = (text = '') => {
     const t = text.trim().toLowerCase(), d = t.replace(/\D/g, '');
     let list = all.slice().sort(sorters[sort]);
-    if (sort === 'due') list = list.filter((c) => c.due > 0);
-    if (t) list = list.filter((c) => c.name.toLowerCase().includes(t) || (d.length >= 3 && c.phone.replace(/\D/g, '').includes(d)));
-    $('#c-list', v).innerHTML = list.slice(0, 200).map((c, i) => `<a class="card client-row" href="#/client/${encodeURIComponent(c.key)}">
-      <span class="rank">${sort === 'spent' && !t ? i + 1 : '👤'}</span>
-      <div class="grow"><b>${esc(c.name)}</b><div class="small muted">${esc(c.phone || 'sans numéro')} · ${c.orders.length} commande(s) · dernière ${fmtDate(c.lastAt, false)}</div></div>
-      <div class="right"><b>${money(c.spent)}</b>${c.due > 0 ? `<div class="small" style="color:var(--red)">doit ${money(c.due)}</div>` : ''}</div></a>`).join('') || '<div class="empty">Aucun client.</div>';
+    if (sort === 'due') list = list.filter((c) => c.totalDue > 0);
+    if (t) list = list.filter((c) => c.name.toLowerCase().includes(t) || (d.length >= 3 && (c.phone || '').replace(/\D/g, '').includes(d)));
+    $('#c-list', v).innerHTML = list.slice(0, 300).map((c, i) => `<a class="card client-row" href="#/client/${c.id}">
+      <span class="rank">${sort === 'spent' && !t ? i + 1 : c.sex === 'F' ? '👩' : c.sex === 'M' ? '👨' : '👤'}</span>
+      <div class="grow"><b>${esc(c.name)}</b><div class="small muted">${esc(c.phone || 'sans numéro')} · ${c.orders.length} commande(s)${c.orders.length ? ' · dernière ' + fmtDate(c.lastAt, false) : ''}</div></div>
+      <div class="right"><b>${money(c.spent)}</b>${c.totalDue > 0 ? `<div class="small" style="color:var(--red)">doit ${money(c.totalDue)}</div>` : ''}</div></a>`).join('') || '<div class="empty">Aucun client.</div>';
   };
   $('#c-q', v).oninput = (e) => draw(e.target.value);
   draw();
 };
 
-routes.client = async (key) => {
+routes.clientform = async (id) => {
   setNav('more');
-  key = decodeURIComponent(key || '');
-  const c = L.listClients(await db.all('orders')).find((x) => x.key === key);
-  setTop({ title: 'Fiche client', back: '#/clients' });
+  const c = id ? await L.getClientReg(Number(id)) : null;
+  setTop({ title: c ? 'Modifier le client' : 'Nouveau client', back: c ? `#/client/${c.id}` : '#/clients' });
+  const v = view(`<div class="card stack">
+      <div class="grid2"><div><label class="f">Nom</label><input class="i" id="cf-last" autocapitalize="characters" value="${esc(c ? c.lastName : '')}"></div>
+        <div><label class="f">Prénom</label><input class="i" id="cf-first" autocapitalize="words" value="${esc(c ? c.firstName : '')}"></div></div>
+      <label class="f">Sexe</label>
+      <div class="seg sex" id="cf-sex"><a data-sex="M" class="${c && c.sex === 'M' ? 'on' : ''}">Monsieur</a><a data-sex="F" class="${c && c.sex === 'F' ? 'on' : ''}">Madame</a></div>
+      <div><label class="f">Numéro WhatsApp</label><input class="i" id="cf-phone" type="tel" inputmode="tel" value="${esc(c ? c.phone : '')}" placeholder="ex. 01 97 00 00 00"></div>
+      <div><label class="f">Ancien solde / arriéré (F) — ce qu'il doit déjà</label><input class="i" id="cf-arr" type="number" inputmode="numeric" min="0" value="${c && c.arrears ? c.arrears : ''}" placeholder="0"></div>
+      <div><label class="f">Note</label><input class="i" id="cf-note" value="${esc(c ? c.note : '')}" placeholder="ex. client du quartier, préfère la livraison"></div>
+      <button class="btn primary big block" id="cf-save">${c ? 'Enregistrer' : 'Ajouter le client'}</button>
+    </div>`);
+  $('#cf-sex', v).onclick = (e) => { const a = e.target.closest('[data-sex]'); if (!a) return; $$('#cf-sex a', v).forEach((x) => x.classList.toggle('on', x === a)); };
+  $('#cf-save', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const sexA = $('#cf-sex a.on', v);
+    if (!sexA) throw new Error('Choisissez Monsieur ou Madame.');
+    const rec = await L.saveClient({ ...(c || {}), lastName: $('#cf-last', v).value, firstName: $('#cf-first', v).value, sex: sexA.dataset.sex, phone: $('#cf-phone', v).value, arrears: $('#cf-arr', v).value, note: $('#cf-note', v).value });
+    toast(c ? 'Client modifié' : 'Client ajouté');
+    location.hash = `#/client/${rec.id}`;
+  });
+};
+
+routes.client = async (id) => {
+  setNav('more');
+  const reg = await L.getClientsReg();
+  const c = L.clientsWithStats(reg, await db.all('orders')).find((x) => x.id === Number(id));
+  setTop({ title: 'Fiche client', back: '#/clients', right: c ? `<a class="pill" href="#/clientform/${c.id}" style="text-decoration:none">Modifier</a>` : '' });
   if (!c) { view('<div class="empty">Client introuvable.</div>'); return; }
   const lp = L.loyaltyProgress(S, c.orders.length);
   const fav = {};
   for (const o of c.orders) for (const i of o.items) fav[i.name] = (fav[i.name] || 0) + i.qty;
   const favs = Object.entries(fav).sort((a, b) => b[1] - a[1]).slice(0, 4);
-  const v = view(`<div class="hero"><span>${c.orders.length} commande(s) depuis le ${fmtDate(c.firstAt, false)}</span><b>${esc(c.name)}</b>
-      <small>${esc(c.phone || 'sans numéro')}</small></div>
+  const v = view(`<div class="hero"><span>${L.civility(c.sex)}${c.orders.length ? ` · ${c.orders.length} commande(s) depuis le ${fmtDate(c.firstAt, false)}` : ' · nouveau client'}</span><b>${esc(c.name)}</b>
+      <small>${esc(c.phone || 'sans numéro')}${c.note ? ' · ' + esc(c.note) : ''}</small></div>
     <div class="kpis" style="margin-top:10px">
       <div class="kpi"><span>Total dépensé</span><b>${money(c.spent)}</b></div>
-      <div class="kpi"><span>Panier moyen</span><b>${money(c.spent / c.orders.length)}</b></div>
+      <div class="kpi"><span>Panier moyen</span><b>${money(c.orders.length ? c.spent / c.orders.length : 0)}</b></div>
       <div class="kpi"><span>Pièces confiées</span><b>${c.pieces}</b></div>
-      <div class="kpi"><span>Reste à payer</span><b style="color:${c.due ? 'var(--red)' : 'inherit'}">${money(c.due)}</b></div></div>
+      <div class="kpi"><span>Doit en tout</span><b style="color:${c.totalDue ? 'var(--red)' : 'inherit'}">${money(c.totalDue)}</b>${c.arrears ? `<span>dont ancien solde ${money(c.arrears)}</span>` : ''}</div></div>
     ${lp ? `<div class="card" style="margin-top:12px"><h3 class="ch-title">🎁 Fidélité</h3>
       <div class="dots">${Array.from({ length: lp.every }, (_, i) => `<i class="${i < lp.done ? 'on' : ''} ${i === lp.every - 1 ? 'gift' : ''}"></i>`).join('')}</div>
-      <p class="small" style="margin:8px 0 0">${lp.left === 0 ? '<b>Sa prochaine commande est récompensée !</b>' : `Encore ${lp.left + 1} commande(s) avant la récompense`} (${S.loyaltyType === 'amount' ? money(S.loyaltyValue) : S.loyaltyValue + ' %'} toutes les ${lp.every} commandes).</p></div>` : ''}
+      <p class="small" style="margin:8px 0 0">${lp.left === 0 ? '<b>Sa prochaine commande est récompensée !</b>' : `Encore ${lp.left + 1} commande(s) avant la récompense`}.</p></div>` : ''}
     <div class="btns" style="margin:12px 0">
-      <a class="btn primary" href="#/new?name=${encodeURIComponent(c.name)}&phone=${encodeURIComponent(c.phone)}">+ Nouvelle facture</a>
-      ${c.phone ? `<a class="btn" href="tel:${esc(c.phone)}">📞 Appeler</a>` : '<span></span>'}
+      <a class="btn primary" href="#/new?cid=${c.id}">+ Nouvelle facture</a>
+      ${c.phone ? `<button class="btn wa" id="cl-wa">WhatsApp</button>` : '<span></span>'}
     </div>
     ${favs.length ? `<div class="card"><h3 class="ch-title">Ce qu'il confie le plus</h3>${Charts.hbars(favs, (n) => n + ' pcs')}</div>` : ''}
-    <h2>Historique</h2>
-    ${c.orders.slice().reverse().map((o) => orderCard(o, { showAction: false })).join('')}`);
+    ${c.orders.length ? `<h2>Historique</h2>${c.orders.slice().reverse().map((o) => orderCard(o, { showAction: false })).join('')}` : ''}`);
   Charts.enableTips(v);
+  if ($('#cl-wa', v)) $('#cl-wa', v).onclick = () => waOpen(c.phone, `Bonjour ${L.civility(c.sex)} ${String(c.lastName).toUpperCase()},`, S);
+};
+
+routes.promos = async () => {
+  if (needAdmin('promos')) return;
+  setNav('more');
+  setTop({ title: 'Promotions', back: '#/more', right: '<a class="pill" href="#/promoform" style="text-decoration:none">+ Ajouter</a>' });
+  const list = await L.getPromos();
+  const arts = await L.getArticles();
+  const v = view(`<p class="small muted" style="margin:0 0 10px">Les promotions <b>automatiques</b> s'appliquent seules sur la facture ; les autres y sont proposées à cocher.</p>
+    ${list.map((p) => `<div class="card edge ${p.active && L.promoActiveNow(p) ? 'green' : 'done'}">
+      <div class="row between"><b>${esc(p.name)}</b><label class="switch"><input type="checkbox" data-toggle="${p.id}" ${p.active ? 'checked' : ''}><span></span></label></div>
+      <p class="small" style="margin:6px 0">${esc(L.promoDescription(p, arts))}</p>
+      <div class="small muted">${p.auto ? '⚡ Automatique' : '☑️ Au choix sur la facture'}${p.active && !L.promoActiveNow(p) ? ' · pas valable aujourd’hui' : ''}</div>
+      <div class="btns" style="margin-top:8px"><a class="btn sm" href="#/promoform/${p.id}">Modifier</a><button class="btn sm danger" data-pdel="${p.id}">Supprimer</button></div></div>`).join('') || '<div class="empty">Aucune promotion. Touchez « + Ajouter ».</div>'}`);
+  v.onchange = async (e) => {
+    const t = e.target.closest('[data-toggle]'); if (!t) return;
+    const l = await L.getPromos(); const p = l.find((x) => x.id === Number(t.dataset.toggle)); p.active = t.checked;
+    await L.savePromos(l); toast(p.active ? 'Promotion activée' : 'Promotion désactivée'); routes.promos();
+  };
+  v.onclick = async (e) => {
+    const d = e.target.closest('[data-pdel]'); if (!d) return;
+    if (!(await ask({ title: 'Supprimer cette promotion ?', text: 'Les factures déjà faites gardent leur remise.', ok: 'Supprimer', danger: true }))) return;
+    await L.savePromos((await L.getPromos()).filter((x) => x.id !== Number(d.dataset.pdel))); routes.promos();
+  };
+};
+
+routes.promoform = async (id) => {
+  if (needAdmin('promos')) return;
+  setNav('more');
+  const p = id ? (await L.getPromos()).find((x) => x.id === Number(id)) : null;
+  const arts = await L.getArticles();
+  const cur = p || { name: '', type: 'percent', value: 10, scope: 'all', articles: [], minAmount: 0, from: '', to: '', days: [], auto: true, active: true };
+  setTop({ title: p ? 'Modifier la promotion' : 'Nouvelle promotion', back: '#/promos' });
+  const v = view(`<div class="card stack">
+      <div><label class="f">Nom (affiché sur la facture)</label><input class="i" id="pf-name" value="${esc(cur.name)}" placeholder="ex. Promo Tabaski, Mercredi chemises"></div>
+      <div class="grid2"><div><label class="f">Remise</label><input class="i" id="pf-val" type="number" min="0" value="${cur.value}"></div>
+        <div><label class="f">Type</label><select class="i" id="pf-type">
+          <option value="percent" ${cur.type === 'percent' ? 'selected' : ''}>%</option>
+          <option value="amount" ${cur.type === 'amount' ? 'selected' : ''}>F (sur la commande)</option>
+          <option value="perPiece" ${cur.type === 'perPiece' ? 'selected' : ''}>F par pièce</option></select></div></div>
+      <label class="f">S'applique sur</label>
+      <div class="seg" id="pf-scope"><a data-s="all" class="${cur.scope !== 'articles' ? 'on' : ''}">Toute la commande</a><a data-s="articles" class="${cur.scope === 'articles' ? 'on' : ''}">Certains articles</a></div>
+      <div id="pf-arts" class="${cur.scope === 'articles' ? '' : 'hidden'}">${arts.map((a) => `<label class="check"><input type="checkbox" value="${a.id}" ${(cur.articles || []).includes(a.id) ? 'checked' : ''}> ${esc(a.name)} <span class="muted small">${money(a.price)}</span></label>`).join('')}</div>
+      <div><label class="f">Minimum de commande (F, articles) — facultatif</label><input class="i" id="pf-min" type="number" min="0" value="${cur.minAmount || ''}" placeholder="0 = aucun"></div>
+      <div class="grid2"><div><label class="f">Du — facultatif</label><input class="i" id="pf-from" type="date" value="${cur.from || ''}"></div>
+        <div><label class="f">Au — facultatif</label><input class="i" id="pf-to" type="date" value="${cur.to || ''}"></div></div>
+      <label class="f">Jours de la semaine (aucun coché = tous les jours)</label>
+      <div class="days" id="pf-days">${L.PROMO_DAYS.map((d, i) => `<a data-d="${i}" class="${(cur.days || []).includes(i) ? 'on' : ''}">${d}</a>`).join('')}</div>
+      <label class="check"><input type="checkbox" id="pf-auto" ${cur.auto ? 'checked' : ''}> ⚡ Appliquer automatiquement (sinon, proposée à cocher)</label>
+      <label class="check"><input type="checkbox" id="pf-active" ${cur.active ? 'checked' : ''}> Promotion active</label>
+      <button class="btn primary big block" id="pf-save">${p ? 'Enregistrer' : 'Créer la promotion'}</button>
+    </div>`);
+  $('#pf-scope', v).onclick = (e) => { const a = e.target.closest('[data-s]'); if (!a) return; $$('#pf-scope a', v).forEach((x) => x.classList.toggle('on', x === a)); $('#pf-arts', v).classList.toggle('hidden', a.dataset.s !== 'articles'); };
+  $('#pf-days', v).onclick = (e) => { const a = e.target.closest('[data-d]'); if (a) a.classList.toggle('on'); };
+  $('#pf-save', v).onclick = async () => {
+    const rec = {
+      ...cur, id: cur.id || Date.now(), name: $('#pf-name', v).value.trim(), type: $('#pf-type', v).value, value: Number($('#pf-val', v).value) || 0,
+      scope: $('#pf-scope a.on', v).dataset.s, articles: $$('#pf-arts input:checked', v).map((x) => Number(x.value)),
+      minAmount: Number($('#pf-min', v).value) || 0, from: $('#pf-from', v).value, to: $('#pf-to', v).value,
+      days: $$('#pf-days a.on', v).map((x) => Number(x.dataset.d)), auto: $('#pf-auto', v).checked, active: $('#pf-active', v).checked,
+    };
+    if (!rec.name) { toast('Donnez un nom à la promotion', true); return; }
+    if (rec.value <= 0) { toast('Indiquez le montant de la remise', true); return; }
+    if (rec.scope === 'articles' && !rec.articles.length) { toast('Cochez au moins un article', true); return; }
+    if (rec.type === 'percent' && rec.value > 100) { toast('100 % maximum', true); return; }
+    const list = (await L.getPromos()).filter((x) => x.id !== rec.id); list.push(rec);
+    await L.savePromos(list); toast('Promotion enregistrée'); location.hash = '#/promos';
+  };
 };
 
 routes.claims = async (_, q) => {
@@ -814,6 +1015,7 @@ routes.more = async () => {
   const v = view(`<div class="card menu">
       <a href="#/ironing"><span class="ic">👕</span>Repassage</a>
       <a href="#/clients"><span class="ic">👥</span>Clients</a>
+      <a href="#/promos"><span class="ic">🏷️</span>Promotions${lock()}</a>
       <a href="#/claims"><span class="ic">⚠️</span>Réclamations</a>
       <a href="#/cousin"><span class="ic">🧺</span>Compte du cousin${lock()}</a>
       <a href="#/orders?s=all"><span class="ic">🧾</span>Toutes les factures</a>
@@ -1014,10 +1216,11 @@ routes.settings = async () => {
         <div><label class="f">Premier N° de facture</label><input class="i" id="s-start" type="number" value="${S.invoiceStart}"></div></div>
       <div class="grid2"><div><label class="f">Délai de rendu (jours)</label><input class="i" id="s-due" type="number" min="0" value="${S.dueDays}"></div><div></div></div>
       <label class="check"><input type="checkbox" id="s-mr" ${S.monthlyReport !== false ? 'checked' : ''}> 📊 Bilan mensuel automatique (le 1er du mois${isNative ? ', avec notification à 9 h' : ''})</label>
-      <b style="margin-top:6px">💰 Remise sur grosse commande</b>
-      <div class="grid2"><div><label class="f">À partir de (F, articles)</label><input class="i" id="s-vmin" type="number" min="0" value="${S.volumeMin}"></div>
-        <div><label class="f">Remise (%)</label><input class="i" id="s-vpct" type="number" min="0" max="100" value="${S.volumePercent}"></div></div>
-      <p class="small muted" style="margin:0">0 dans l'un des deux champs = pas de remise automatique.</p>
+      <a class="btn ghost block" href="#/promos">🏷️ Gérer les promotions (remises, 10 % dès 5 000 F…)</a>
+      <b style="margin-top:6px">💬 WhatsApp</b>
+      <div class="grid2"><div><label class="f">Envoyer avec</label><select class="i" id="s-waapp"><option value="business" ${S.waApp !== 'normal' ? 'selected' : ''}>WhatsApp Business</option><option value="normal" ${S.waApp === 'normal' ? 'selected' : ''}>WhatsApp</option></select></div>
+        <div><label class="f">Numéro WhatsApp du pressing</label><input class="i" id="s-wanum" type="tel" value="${esc(S.waBusinessPhone || '')}"></div></div>
+      <p class="small muted" style="margin:0">Les messages partent du WhatsApp installé sur ce téléphone : installez-y WhatsApp Business avec ce numéro.</p>
       <b style="margin-top:6px">🎁 Fidélité</b>
       <div class="grid2"><div><label class="f">Récompense toutes les … commandes (0 = désactivé)</label><input class="i" id="s-lev" type="number" min="0" value="${S.loyaltyEvery}"></div>
         <div><label class="f">Récompense</label><div class="row"><input class="i grow" id="s-lval" type="number" min="0" value="${S.loyaltyValue}"><select class="i" id="s-ltype" style="width:auto"><option value="percent" ${S.loyaltyType !== 'amount' ? 'selected' : ''}>%</option><option value="amount" ${S.loyaltyType === 'amount' ? 'selected' : ''}>F</option></select></div></div></div>
@@ -1049,7 +1252,7 @@ routes.settings = async () => {
       dueDays: Math.max(0, Number($('#s-due', v).value) || 0), loyaltyEvery: Math.max(0, Number($('#s-lev', v).value) || 0),
       loyaltyValue: Math.max(0, Number($('#s-lval', v).value) || 0), loyaltyType: $('#s-ltype', v).value,
       monthlyReport: $('#s-mr', v).checked,
-      volumeMin: Math.max(0, Number($('#s-vmin', v).value) || 0), volumePercent: Math.min(100, Math.max(0, Number($('#s-vpct', v).value) || 0)),
+      waApp: $('#s-waapp', v).value, waBusinessPhone: $('#s-wanum', v).value.trim(),
     });
     if (pin) unlocked = true;
     await L.saveSettings(S); toast('Réglages enregistrés');
@@ -1210,6 +1413,7 @@ async function render() {
 }
 
 async function renderNow() {
+  try { REG = await L.getClientsReg(); } catch (e) { REG = []; }
   if (cleanup) { try { cleanup(); } catch (e) {} cleanup = null; }
   const raw = location.hash.replace(/^#\/?/, '') || 'home';
   const [path, qs] = raw.split('?');
@@ -1244,6 +1448,9 @@ function startAutoBackup() {
 async function boot() {
   S = await L.getSettings();
   if (await L.isInitialized()) {
+    await L.migrateClients();
+    await L.migrateVolumePromo();
+    S = await L.getSettings();
     startAutoBackup();
     if (isNative && !(await db.kv('reminderScheduled'))) { if (await scheduleMonthlyReminder(S.monthlyReport !== false)) await db.kv('reminderScheduled', true); }
   }

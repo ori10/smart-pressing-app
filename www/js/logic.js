@@ -27,7 +27,7 @@ const DEFAULT_SETTINGS = {
   name: 'Smart Pressing', city: '', phone: '', logo: '',
   cousinRate: 400, deliveryFee: 500, savingsPercent: 25, invoiceStart: 1, adminPin: '',
   dueDays: 2, loyaltyEvery: 10, loyaltyType: 'percent', loyaltyValue: 20, monthlyReport: true,
-  volumeMin: 5000, volumePercent: 10,
+  volumeMin: 5000, volumePercent: 10, waApp: 'business', waBusinessPhone: '0161084250',
 };
 
 // ---------- formatage ----------
@@ -84,9 +84,12 @@ export function orderTotals(o) {
   const washKg = o.weighedKg != null && o.weighedKg !== '' ? Number(o.weighedKg) : estKg;
   const wash = Math.round(washKg * (o.cousinRate || 0));
   const discount = Math.min(items + (o.deliveryFee || 0), Math.round((o.discount && o.discount.amount) || 0));
-  const total = items + (o.deliveryFee || 0) - discount;
+  const sales = items + (o.deliveryFee || 0) - discount;          // vente de cette facture (chiffre d'affaires)
+  const arrears = Math.max(0, Math.round((o.arrears && o.arrears.amount) || 0)); // ancien solde reporté (hors CA)
+  const total = sales + arrears;                                  // ce que le client doit payer
   const paid = paidAmount(o, total);
-  return { items, discount, total, estKg, washKg, wash, margin: total - wash, pieces: o.pieces.length, paid, due: Math.max(0, total - paid) };
+  const transferred = (o.transfers || []).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+  return { items, discount, sales, arrears, total, estKg, washKg, wash, margin: sales - wash, pieces: o.pieces.length, paid, transferred, due: Math.max(0, total - paid - transferred) };
 }
 
 // ---------- paiements (acomptes, paiements partiels) ----------
@@ -107,7 +110,7 @@ function ensurePayments(o) {
 }
 export function syncPaid(o) {
   const t = orderTotals(o);
-  o.paid = t.total > 0 ? t.paid >= t.total : true;
+  o.paid = t.total > 0 ? t.due <= 0 : true;
 }
 export async function addPayment(o, amount, note = '') {
   amount = Math.round(Number(amount) || 0);
@@ -151,7 +154,7 @@ export function listClients(orders) {
     const k = clientKey(o);
     const c = map.get(k) || { key: k, name: o.clientName, phone: o.clientPhone || '', orders: [], spent: 0, due: 0, pieces: 0, firstAt: o.createdAt, lastAt: o.createdAt };
     const t = orderTotals(o);
-    c.orders.push(o); c.spent += t.total; c.due += t.due; c.pieces += t.pieces;
+    c.orders.push(o); c.spent += t.sales; c.due += t.due; c.pieces += t.pieces;
     if (o.clientName.trim().length >= c.name.trim().length) c.name = o.clientName; if (o.clientPhone) c.phone = o.clientPhone; c.lastAt = o.createdAt;
     map.set(k, c);
   }
@@ -249,22 +252,22 @@ export async function nextNumber() {
   return Math.max(max + 1, Number(s.invoiceStart) || 1);
 }
 
-export async function createOrder({ clientName, clientPhone, quantities, weighedKg, delivery, deliveryPlace, deliveryAt, dueAt, discount, deposit }) {
+export async function createOrder({ clientId, clientSex, clientName, clientPhone, quantities, weighedKg, delivery, deliveryPlace, deliveryAt, dueAt, discount, deposit, arrears, homeOnly }) {
   const s = await getSettings();
   const arts = await getArticles();
   const items = [];
   for (const a of arts) {
     const q = quantities[a.id] || 0;
-    if (q > 0) items.push({ name: a.name, qty: q, price: a.price, weight: a.weight, homeWash: !!a.homeWash });
+    if (q > 0) items.push({ name: a.name, qty: q, price: a.price, weight: a.weight, homeWash: !!(a.homeWash || homeOnly) });
   }
   if (!clientName.trim()) throw new Error('Indiquez le nom du client.');
-  if (!items.length) throw new Error('Ajoutez au moins un article.');
+  if (!items.length && !(arrears && arrears.amount > 0)) throw new Error('Ajoutez au moins un article.');
   const pieces = [];
   let idx = 1;
   for (const it of items) for (let k = 0; k < it.qty; k++) pieces.push({ index: idx++, name: it.name, homeWash: it.homeWash, checks: {} });
   const number = await nextNumber();
   const order = {
-    number, clientName: clientName.trim(), clientPhone: (clientPhone || '').trim(),
+    number, clientId: clientId || null, clientSex: clientSex || '', clientName: clientName.trim(), clientPhone: (clientPhone || '').trim(),
     status: STATUS.RECU, createdAt: nowIso(),
     weighedKg: weighedKg === '' || weighedKg == null ? null : Number(weighedKg),
     deliveryFee: delivery ? Number(s.deliveryFee) || 0 : 0,
@@ -273,6 +276,8 @@ export async function createOrder({ clientName, clientPhone, quantities, weighed
     cousinRate: Number(s.cousinRate) || 0,
     dueAt: dueAt || (delivery && deliveryAt ? deliveryAt : null),
     discount: discount && discount.amount > 0 ? { amount: Math.round(discount.amount), label: discount.label || 'Remise' } : null,
+    arrears: arrears && Number(arrears.amount) > 0 ? { amount: Math.round(Number(arrears.amount)), note: (arrears.note || '').trim() } : null,
+    washMode: homeOnly ? 'maison' : 'cousin',
     paid: false, note: '', items, pieces, payments: [], claims: [],
     events: [{ status: STATUS.RECU, note: 'Facture émise', at: nowIso() }],
   };
@@ -418,7 +423,7 @@ export async function counts() {
   for (const o of orders) {
     c.byStatus[o.status]++;
     if (o.status !== STATUS.LIVRE) c.open++;
-    if (o.createdAt.slice(0, 10) === today) { c.todayCount++; c.todayCA += orderTotals(o).total; }
+    if (o.createdAt.slice(0, 10) === today) { c.todayCount++; c.todayCA += orderTotals(o).sales; }
     const l = lateness(o);
     if (l === 'late') c.late.push(o); else if (l === 'soon') c.soon.push(o);
     c.claims += (o.claims || []).filter((x) => x.status === 'open').length;
@@ -483,13 +488,13 @@ export function computeBilan(orders, expenses, p, settings) {
   const r = { orders: os.length, ca: 0, cashed: 0, unpaid: 0, washKg: 0, wash: 0, current: 0, invest: 0, articles: {}, byDay: {}, byMonth: {} };
   for (const o of os) {
     const t = orderTotals(o);
-    r.ca += t.total; r.washKg += t.washKg; r.wash += t.wash;
+    r.ca += t.sales; r.washKg += t.washKg; r.wash += t.wash; r.arrears = (r.arrears || 0) + t.arrears;
     r.cashed += Math.min(t.paid, t.total); r.unpaid += t.due;
     for (const i of o.items) r.articles[i.name] = (r.articles[i.name] || 0) + i.qty;
     const day = o.createdAt.slice(0, 10), mon = o.createdAt.slice(0, 7);
-    r.byDay[day] = (r.byDay[day] || 0) + t.total;
+    r.byDay[day] = (r.byDay[day] || 0) + t.sales;
     const bm = (r.byMonth[mon] = r.byMonth[mon] || { ca: 0, wash: 0, exp: 0, inv: 0 });
-    bm.ca += t.total; bm.wash += t.wash;
+    bm.ca += t.sales; bm.wash += t.wash;
   }
   const expByCat = {};
   for (const e of es) {
@@ -525,6 +530,8 @@ export async function exportAll() {
     settings: await db.kv('settings'), articles: await db.all('articles'),
     orders: await db.all('orders'), expenses: await db.all('expenses'), photos,
     cousinPayments: (await db.kv('cousinPayments')) || [],
+    promotions: (await db.kv('promotions')) || [],
+    clients: (await db.kv('clients')) || [],
   };
 }
 
@@ -537,6 +544,9 @@ export async function importAll(data) {
   for (const e of data.expenses || []) await db.put('expenses', e);
   for (const [k, v] of Object.entries(data.photos || {})) await db.put('photos', v, k);
   await db.kv('cousinPayments', data.cousinPayments || []);
+  if (data.promotions) { await db.kv('promotions', data.promotions); await db.kv('promosMigrated', true); }
+  if (data.clients) { await db.kv('clients', data.clients); await db.kv('clientsMigrated', true); }
+  else { await db.kv('clients', []); await db.kv('clientsMigrated', false); }
   await db.kv('initialized', nowIso());
 }
 
@@ -591,3 +601,146 @@ export async function pendingReports(s) {
   return out;
 }
 export const reportKey = (p) => (p.kind === 'year' ? p.start.slice(0, 4) : p.start.slice(0, 7));
+
+// ---------- promotions (créées par l'admin) ----------
+export const PROMO_DAYS = ['Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam', 'Dim'];
+export async function getPromos() { return (await db.kv('promotions')) || []; }
+export async function savePromos(list) { await db.kv('promotions', list); }
+
+// L'ancienne « remise 10 % dès 5 000 F » devient une promotion modifiable (une seule fois).
+export async function migrateVolumePromo() {
+  if (await db.kv('promosMigrated')) return;
+  const s = await getSettings();
+  const list = await getPromos();
+  if ((Number(s.volumeMin) || 0) > 0 && (Number(s.volumePercent) || 0) > 0) {
+    list.push({ id: Date.now(), name: `${s.volumePercent} % dès ${money(s.volumeMin)}`, type: 'percent', value: Number(s.volumePercent),
+      scope: 'all', articles: [], minAmount: Number(s.volumeMin), from: '', to: '', days: [], auto: true, active: true });
+    await savePromos(list);
+  }
+  await saveSettings({ ...s, volumeMin: 0 });
+  await db.kv('promosMigrated', true);
+}
+
+export function promoActiveNow(p, now = new Date()) {
+  if (!p.active) return false;
+  const d = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  if (p.from && d < p.from) return false;
+  if (p.to && d > p.to) return false;
+  if (p.days && p.days.length && !p.days.includes((now.getDay() + 6) % 7)) return false;
+  return true;
+}
+// lines : [{ articleId, qty, price }] ; renvoie le montant de remise (0 si non applicable)
+export function promoAmount(p, lines, subtotal) {
+  if (!promoActiveNow(p)) return 0;
+  if ((Number(p.minAmount) || 0) > 0 && subtotal < Number(p.minAmount)) return 0;
+  const target = p.scope === 'articles' ? lines.filter((l) => (p.articles || []).includes(l.articleId)) : lines;
+  const base = target.reduce((s, l) => s + l.qty * l.price, 0);
+  const pieces = target.reduce((s, l) => s + l.qty, 0);
+  if (base <= 0) return 0;
+  const v = Number(p.value) || 0;
+  if (p.type === 'percent') return Math.round(base * Math.min(100, v) / 100);
+  if (p.type === 'perPiece') return Math.min(base, Math.round(v * pieces));
+  return Math.min(base, Math.round(v));
+}
+export function promoDescription(p, articles = []) {
+  const v = p.type === 'percent' ? `${p.value} %` : p.type === 'perPiece' ? `${money(p.value)} par pièce` : money(p.value);
+  const on = p.scope === 'articles' ? ' sur ' + (p.articles || []).map((id) => (articles.find((a) => a.id === id) || {}).name).filter(Boolean).join(', ') : '';
+  const parts = [`−${v}${on}`];
+  if (Number(p.minAmount) > 0) parts.push(`dès ${money(p.minAmount)}`);
+  if (p.days && p.days.length) parts.push(p.days.map((d) => PROMO_DAYS[d]).join(' '));
+  if (p.from || p.to) parts.push(`${p.from ? 'du ' + fmtDate(p.from, false) : ''} ${p.to ? 'au ' + fmtDate(p.to, false) : ''}`.trim());
+  return parts.join(' · ');
+}
+
+// ---------- registre des clients ----------
+export const SEX_LABEL = { M: 'Monsieur', F: 'Madame' };
+export const civility = (sex) => SEX_LABEL[sex] || 'Monsieur/Madame';
+export function clientDisplay(c) { return [String(c.lastName || '').trim().toUpperCase(), String(c.firstName || '').trim()].filter(Boolean).join(' '); }
+export async function getClientsReg() { return (await db.kv('clients')) || []; }
+export async function saveClientsReg(list) { await db.kv('clients', list); }
+export async function getClientReg(id) { return (await getClientsReg()).find((c) => c.id === id) || null; }
+
+export async function saveClient(c) {
+  const list = await getClientsReg();
+  if (!String(c.lastName || '').trim()) throw new Error('Indiquez au moins le nom du client.');
+  const pk = phoneKey(c.phone);
+  const dup = pk && list.find((x) => x.id !== c.id && phoneKey(x.phone) === pk);
+  if (dup) throw new Error(`Ce numéro est déjà celui de ${clientDisplay(dup)}.`);
+  const rec = { arrears: 0, note: '', sex: '', firstName: '', ...c, lastName: c.lastName.trim(), firstName: (c.firstName || '').trim(), phone: (c.phone || '').trim(), arrears: Math.max(0, Math.round(Number(c.arrears) || 0)) };
+  if (!rec.id) { rec.id = Date.now() + Math.floor(Math.random() * 1000); rec.createdAt = nowIso(); list.push(rec); }
+  else { const i = list.findIndex((x) => x.id === rec.id); if (i >= 0) list[i] = { ...list[i], ...rec }; else list.push(rec); }
+  await saveClientsReg(list);
+  // garder les factures alignées sur la fiche (nom, téléphone, sexe)
+  for (const o of await db.all('orders')) if (o.clientId === rec.id) {
+    o.clientName = clientDisplay(rec); o.clientPhone = rec.phone; o.clientSex = rec.sex; await saveOrder(o);
+  }
+  return rec;
+}
+
+// Première ouverture de cette version : chaque client des anciennes factures reçoit une fiche.
+export async function migrateClients() {
+  if (await db.kv('clientsMigrated')) return;
+  const list = await getClientsReg();
+  const orders = (await db.all('orders')).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  for (const o of orders) {
+    if (o.clientId && list.find((c) => c.id === o.clientId)) continue;
+    const pk = phoneKey(o.clientPhone);
+    let c = list.find((x) => (pk && phoneKey(x.phone) === pk) || (!pk && !phoneKey(x.phone) && clientDisplay(x).toLowerCase() === o.clientName.trim().toUpperCase().toLowerCase()));
+    if (!c) {
+      c = { id: Date.now() + list.length, lastName: o.clientName.trim(), firstName: '', sex: o.clientSex || '', phone: o.clientPhone || '', arrears: 0, note: '', createdAt: o.createdAt };
+      list.push(c);
+    } else if (o.clientPhone && !c.phone) c.phone = o.clientPhone;
+    o.clientId = c.id; await saveOrder(o);
+  }
+  await saveClientsReg(list);
+  await db.kv('clientsMigrated', true);
+}
+
+// Fiches + statistiques (commandes, dépensé, dû) ; les clients sans commande apparaissent aussi.
+export function clientsWithStats(reg, orders) {
+  const byId = new Map(reg.map((c) => [c.id, { ...c, key: 'id:' + c.id, name: clientDisplay(c), orders: [], spent: 0, due: 0, pieces: 0, firstAt: c.createdAt || '', lastAt: c.createdAt || '' }]));
+  for (const o of orders.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const c = byId.get(o.clientId); if (!c) continue;
+    const t = orderTotals(o);
+    c.orders.push(o); c.spent += t.sales; c.due += t.due; c.pieces += t.pieces;
+    if (!c.firstAt || o.createdAt < c.firstAt) c.firstAt = o.createdAt;
+    if (o.createdAt > c.lastAt) c.lastAt = o.createdAt;
+  }
+  return [...byId.values()].map((c) => ({ ...c, totalDue: c.due + (c.arrears || 0) }));
+}
+
+// Montants d'arriéré connus pour un client : ancien solde de la fiche + restes des factures précédentes.
+export async function knownArrears(clientId) {
+  const c = await getClientReg(clientId);
+  const open = (await db.all('orders')).filter((o) => o.clientId === clientId).map((o) => ({ o, due: orderTotals(o).due })).filter((x) => x.due > 0).sort((a, b) => a.o.number - b.o.number);
+  return { fiche: c ? c.arrears || 0 : 0, invoices: open.map((x) => ({ number: x.o.number, due: x.due })) };
+}
+
+// Après émission : consommer l'ancien solde de la fiche et reporter les restes des anciennes factures.
+export async function applyArrears(newOrder, { fromFiche = 0, fromInvoices = [] }) {
+  if (fromFiche > 0 && newOrder.clientId) {
+    const list = await getClientsReg();
+    const c = list.find((x) => x.id === newOrder.clientId);
+    if (c) { c.arrears = Math.max(0, (c.arrears || 0) - fromFiche); await saveClientsReg(list); }
+  }
+  for (const n of fromInvoices) {
+    const o = await getOrder(n); if (!o) continue;
+    const due = orderTotals(o).due; if (due <= 0) continue;
+    o.transfers = o.transfers || [];
+    o.transfers.push({ amount: due, toOrder: newOrder.number, at: nowIso() });
+    o.events.push({ status: o.status, note: `Reste ${money(due)} reporté sur la facture N°${newOrder.number}`, at: nowIso() });
+    syncPaid(o); await saveOrder(o);
+  }
+}
+
+// ---------- messages WhatsApp ----------
+export function lastNameOf(o, reg) {
+  const c = reg && reg.find((x) => x.id === o.clientId);
+  return c ? String(c.lastName || '').trim().toUpperCase() : o.clientName.trim().split(/\s+/)[0].toUpperCase();
+}
+export function readyMessage(o, reg, s) {
+  return `Bonjour ${civility(o.clientSex)} ${lastNameOf(o, reg)}, vos habits sont prêts. Pouvons-nous passer ?\n\n${s.name || 'Smart Pressing'}`;
+}
+export function thanksMessage(o, reg, s, renewed) {
+  return `Bonjour ${civility(o.clientSex)} ${lastNameOf(o, reg)},\nToute l'équipe ${s.name || 'Smart Pressing'} vous remercie pour votre confiance${renewed ? ' encore renouvelée' : ''}. Vos suggestions et critiques sont les bienvenues.`;
+}

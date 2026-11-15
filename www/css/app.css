@@ -261,3 +261,23 @@ body.white, body.white main { background: #fff; }
 
 .card.report { border: 2px solid var(--blue); background: linear-gradient(180deg, var(--soft-blue), #fff 60%); }
 .card.report .x { background: none; border: 0; font-size: 1.1rem; color: var(--muted); padding: 4px 8px; }
+
+/* clients, arriérés, promotions */
+.combo { position: relative; }
+.combo .i { padding-right: 48px; }
+.combo-btn { position: absolute; right: 4px; top: 4px; bottom: 4px; width: 40px; border: 0; border-radius: 9px; background: var(--soft-blue); color: var(--navy); font-size: 1.1rem; }
+#n-list { max-height: 300px; overflow-y: auto; }
+.sugg .newbtn { color: var(--blue); font-weight: 700; background: var(--soft-blue); }
+.newc { margin-top: 10px; padding: 12px; border: 1.5px dashed var(--blue); border-radius: 12px; }
+.seg.sex a { padding: 12px 6px; }
+.arr { margin-top: 8px; padding: 12px; background: var(--soft-orange); border-radius: 12px; }
+.arr .check { min-height: 38px; font-weight: 500; font-size: .92rem; }
+.days { display: flex; gap: 6px; flex-wrap: wrap; }
+.days a { flex: 1; min-width: 40px; text-align: center; padding: 10px 0; border-radius: 10px; border: 1.5px solid var(--line); font-weight: 700; font-size: .85rem; color: var(--muted); cursor: pointer; }
+.days a.on { background: var(--navy); color: #fff; border-color: var(--navy); }
+.switch { position: relative; width: 48px; height: 28px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 14px; transition: .2s; }
+.switch span::after { content: ''; position: absolute; left: 3px; top: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: .2s; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+.switch input:checked + span { background: var(--green); }
+.switch input:checked + span::after { transform: translateX(20px); }

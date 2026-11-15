@@ -97,3 +97,40 @@ export async function scheduleMonthlyReminder(on) {
     return true;
   } catch (e) { console.warn('rappel', e); return false; }
 }
+
+// ---------- WhatsApp (Business de préférence) ----------
+const Wa = isNative ? plugin('WaLauncher') : null;
+const PKG = { business: 'com.whatsapp.w4b', normal: 'com.whatsapp' };
+function pkgOrder(s) { return s && s.waApp === 'normal' ? [PKG.normal, PKG.business] : [PKG.business, PKG.normal]; }
+
+// Ouvre la conversation du client avec le texte prêt à envoyer.
+export async function waOpen(phone, text, s) {
+  const num = waNumber(phone);
+  if (Wa) {
+    for (const pkg of pkgOrder(s)) {
+      try { await Wa.open({ phone: num, text, package: pkg }); return 'app'; } catch (e) {}
+    }
+  }
+  openExternal(`https://wa.me/${num}?text=${encodeURIComponent(text)}`);
+  return 'link';
+}
+
+// Envoie une image (carte) + texte dans la conversation du client.
+export async function waSendImage(blob, filename, phone, text, s) {
+  const num = waNumber(phone);
+  if (Wa) {
+    const data = await blobToBase64(blob);
+    const res = await Filesystem.writeFile({ path: filename, data, directory: 'CACHE' });
+    for (const pkg of pkgOrder(s)) {
+      try { await Wa.sendImage({ phone: num, text, package: pkg, path: res.uri }); return 'app'; } catch (e) {}
+    }
+    try { await Share.share({ text, files: [res.uri], dialogTitle: 'Envoyer la carte' }); return 'share'; } catch (e) { return 'cancelled'; }
+  }
+  const file = new File([blob], filename, { type: blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], text }); return 'share'; } catch (e) { if (e.name === 'AbortError') return 'cancelled'; }
+  }
+  download(blob, filename);
+  openExternal(`https://wa.me/${num}?text=${encodeURIComponent(text)}`);
+  return 'link';
+}

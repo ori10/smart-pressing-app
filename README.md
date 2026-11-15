@@ -35,6 +35,17 @@ Adresse : **https://ori10.github.io/smart-pressing-app/** (publiée automatiquem
 Chaque téléphone a **sa propre base** : ce qui est saisi sur l'iPhone n'apparaît pas sur l'Android (et inversement).
 N'ouvrez l'appli iPhone que depuis l'icône de l'écran d'accueil (les données de Safari et de l'icône sont séparées).
 
+## Clients, arriérés, promotions, WhatsApp
+- **Clients** (Plus → Clients) : fiche avec nom, prénom, sexe, numéro WhatsApp et ancien solde ; à la facture, liste
+  déroulante, et un nom inconnu crée la fiche à l'émission. Les clients des anciennes factures sont repris automatiquement.
+- **Arriéré** à la facture : l'appli propose l'ancien solde de la fiche et les restes des anciennes factures (reportés,
+  donc jamais comptés deux fois) ou un montant libre. L'arriéré est hors chiffre d'affaires.
+- **Lavage** par facture : chez le cousin ou à la maison (pas de coût, pas d'étape cousin).
+- **Promotions** (Plus → Promotions, admin) : %, F ou F par pièce ; toute la commande ou certains articles ; minimum,
+  dates, jours de la semaine ; automatique ou au choix.
+- **WhatsApp Business** : « Monsieur/Madame NOM, vos habits sont prêts. Pouvons-nous passer ? » et, après la livraison,
+  carte de remerciement en image. Sur Android, la conversation du client s'ouvre directement dans WhatsApp Business.
+
 ## Sauvegarde automatique en ligne
 Plus → Sauvegarde → « Sauvegarde automatique en ligne » : le guide pas à pas est dans l'appli (compte Supabase gratuit,
 dossier `sauvegardes`, code SQL à copier, adresse + clé + mot de passe). Ensuite, chaque soir à partir de 19 h, dès que

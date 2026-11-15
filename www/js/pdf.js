@@ -76,6 +76,7 @@ export async function invoicePdf(o, s) {
   const rows = o.items.map((i) => [i.name, String(i.qty), m(i.price), m(i.qty * i.price)]);
   if (o.deliveryFee) rows.push(['Livraison', '1', m(o.deliveryFee), m(o.deliveryFee)]);
   if (t.discount) rows.push([(o.discount && o.discount.label) || 'Remise', '', '', '- ' + m(t.discount)]);
+  if (t.arrears) rows.push(['Arriéré' + (o.arrears.note ? ' (' + o.arrears.note + ')' : ''), '', '', m(t.arrears)]);
   for (const r of rows) {
     if (y > 250) { doc.addPage(); y = 20; }
     const name = doc.splitTextToSize(r[0], cols[1] - cols[0] - 15);
@@ -118,7 +119,7 @@ export async function ticketPdf(o, s) {
   const t = orderTotals(o);
   const W = 58, X = 4, RX = W - 4;
   // hauteur calculée d'après le contenu
-  const lines = o.items.length + (o.deliveryFee ? 1 : 0) + (t.discount ? 1 : 0);
+  const lines = o.items.length + (o.deliveryFee ? 1 : 0) + (t.discount ? 2 : 0) + (t.arrears ? 2 : 0);
   const H = 92 + lines * 8 + (t.paid > 0 && t.due > 0 ? 10 : 0) + (s.logo ? 20 : 0);
   const doc = new jsPDF({ unit: 'mm', format: [W, H] });
   let y = 5;
@@ -143,6 +144,7 @@ export async function ticketPdf(o, s) {
   for (const i of o.items) lr(`${i.qty} x ${i.name}`, m(i.qty * i.price));
   if (o.deliveryFee) lr('Livraison', m(o.deliveryFee));
   if (t.discount) lr('Remise', '- ' + m(t.discount));
+  if (t.arrears) lr('Arriéré' + (o.arrears.note ? ' (' + o.arrears.note + ')' : ''), m(t.arrears));
   dash();
   lr('TOTAL', m(t.total), 11, true);
   if (t.paid > 0 && t.due > 0) { lr('Payé', m(t.paid)); lr('RESTE À PAYER', m(t.due), 9, true); }

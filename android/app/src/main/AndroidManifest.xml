@@ -35,6 +35,12 @@
         </provider>
     </application>
 
+    <!-- Applis WhatsApp que l'appli peut ouvrir -->
+    <queries>
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="com.whatsapp" />
+    </queries>
+
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
