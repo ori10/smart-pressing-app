@@ -2,8 +2,10 @@
 const VERSION = 'mp-__BUILD__';
 const FILES = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
-  './js/app.js', './js/cloud.js', './js/db.js', './js/ia.js', './js/native.js',
-  './vendor/capacitor.js', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
+  './js/app.js', './js/card.js', './js/charts.js', './js/cloud.js', './js/db.js', './js/export.js', './js/ia.js', './js/logic.js', './js/native.js', './js/pdf.js', './js/plus.js', './js/scan.js', './js/seed.js',
+  './vendor/capacitor.js', './vendor/jspdf.umd.min.js', './vendor/xlsx.full.min.js',
+  './fonts/pjs-400.woff2', './fonts/pjs-600.woff2', './fonts/pjs-700.woff2', './fonts/pjs-800.woff2',
+  './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png', './img/logo.jpg',
 ];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));

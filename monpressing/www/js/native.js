@@ -91,7 +91,7 @@ export async function scheduleMonthlyReminder(on) {
     if (perm.display !== 'granted') perm = await Notif.requestPermissions();
     if (perm.display !== 'granted') return false;
     await Notif.schedule({ notifications: [{
-      id: 101, title: 'MonPressing', body: 'Le bilan du mois dernier est prêt : ouvrez l’appli pour le voir.',
+      id: 101, title: 'MonPressing', body: 'Le bilan du mois dernier est prêt : ouvrez l’appli pour l’envoyer.',
       schedule: { on: { day: 1, hour: 9, minute: 0 }, repeats: true, allowWhileIdle: true },
     }] });
     return true;
@@ -152,22 +152,15 @@ export async function scheduleReminderNotif(when, count, hour = 10) {
   } catch (e) { return false; }
 }
 
-// ---------- Dictée vocale (reconnaissance d'Android) ----------
+// ---------- MonPressing : dictée vocale (reconnaissance d'Android) ----------
 const Speech = isNative ? plugin('SpeechRecognition') : null;
 export const hasNativeSpeech = !!Speech;
 export async function listenNative() {
   const dispo = await Speech.available();
-  if (!dispo || !dispo.available) throw new Error('reconnaissance vocale absente du téléphone');
+  if (!dispo || !dispo.available) throw new Error('Reconnaissance vocale absente du téléphone.');
   let perm = await Speech.checkPermissions();
   if (perm.speechRecognition !== 'granted') perm = await Speech.requestPermissions();
-  if (perm.speechRecognition !== 'granted') throw new Error('autorisez le micro');
+  if (perm.speechRecognition !== 'granted') throw new Error('Autorisez le micro pour dicter.');
   const r = await Speech.start({ language: 'fr-FR', maxResults: 1, partialResults: false, popup: true });
   return (r && r.matches && r.matches[0]) || '';
-}
-
-// Partage d'un texte (reçu vers WhatsApp, imprimante Bluetooth RawBT…)
-export async function shareText(text, title = '') {
-  if (isNative) { try { await Share.share({ title, text, dialogTitle: title || 'Partager' }); return 'shared'; } catch (e) { return 'cancelled'; } }
-  if (navigator.share) { try { await navigator.share({ title, text }); return 'shared'; } catch (e) { return 'cancelled'; } }
-  try { await navigator.clipboard.writeText(text); return 'copied'; } catch (e) { return 'failed'; }
 }

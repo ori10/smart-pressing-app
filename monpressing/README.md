@@ -1,46 +1,36 @@
-# MonPressing : deuxième application Android (avec IA)
+# MonPressing = Smart Pressing + IA
 
-MonPressing est construite **comme Smart Pressing**. C'est une appli Capacitor sans serveur : les données restent dans le
-téléphone (IndexedDB), avec une sauvegarde automatique **chiffrée** dans Supabase.
-Elle a son propre identifiant (`com.monpressing.app`) et s'installe **à côté** de Smart Pressing, sans la toucher.
+MonPressing reprend **Smart Pressing tel quel** : même design et mêmes fonctions (factures, étapes jusqu'au cousin, codes
+des pièces, photos, réclamations, clients, arriérés, lavage cousin ou maison, promotions, fidélité, relances WhatsApp,
+dépenses, bilans PDF et Excel, sauvegardes). Les nouveautés s'ajoutent par-dessus.
+C'est une appli séparée (`com.monpressing.app`) : elle s'installe **à côté** de Smart Pressing, avec ses propres données.
 
-## Ce qu'elle fait en plus
-- **Photo au dépôt + IA** : l'IA reconnaît le vêtement, note les taches et les dégâts. La photo est datée, c'est la preuve en cas de litige.
-- **Facture dictée** : « trois chemises, deux pantalons, un boubou bazin, express, pour Madame Houngbo ».
-- **Arriérés** à la facture, **choix cousin** article par article (avec suggestion), **promotions** créées par l'admin et idées de
-  promotions (fêtes béninoises, jours calmes, clients inactifs, IA).
-- **Date de retrait réaliste** : elle tient compte du cousin, de la saison des pluies et de la charge de l'atelier.
-- **Recouvrement** : profil de risque, relances WhatsApp (polie, ferme ou rédigée par l'IA) au bon moment (du 25 au 5).
-- **Caisse** : clôture à l'aveugle et alertes (écarts, annulations, remises, habits remis sans paiement).
-- **Assistant du patron** (questions en français, réponses lues à voix haute), **conseils de détachage** par photo.
-- Plusieurs utilisateurs sur le même téléphone, chacun avec son code PIN (patron = admin, employés).
+## Ce qui s'ajoute
+| Où | Nouveauté |
+|---|---|
+| Nouvelle facture | **🎤 Dicter la commande** (« trois chemises, deux pantalons, un boubou pour Madame Houngbo ») |
+| Nouvelle facture | **📷 Photo + IA** : l'IA reconnaît le vêtement, ajoute l'article et note les taches et dégâts ; la photo est rangée sur la pièce |
+| Nouvelle facture | **Date de rendu conseillée** (saison des pluies, charge de l'atelier, lavage maison) |
+| Facture | **🔍 Taches et dégâts (IA)** sur la photo de chaque pièce, notés sur la pièce |
+| Relances | **Profil de paiement** de chaque client (bon payeur en retard / à surveiller / risque élevé), **bon moment** pour relancer (du 25 au 5), **message rédigé par l'IA** |
+| Promotions | **💡 Idées de promotions** : jour le plus calme, fêtes béninoises (10 janvier, Pâques, Tabaski, 1er août, rentrée, fin d'année), saison des cérémonies, et idées de l'IA. Un toucher remplit le formulaire. |
+| Plus › Caisse du jour | **Clôture de caisse** (espèces + Mobile Money) comparée aux paiements enregistrés |
+| Accueil (admin) | **🚨 À vérifier** : écarts de caisse, factures supprimées, paiements annulés, remises libres trop fréquentes, livraisons sans paiement |
+| Plus › Assistant du patron | Questions en français, à l'écrit ou au micro ; réponses lues à voix haute ou envoyées sur WhatsApp |
+| Plus › Conseils de détachage | Photo de la tache → conseils de l'IA selon le tissu ; guide utilisable sans internet |
+| Plus › Intelligence artificielle | Clé API Claude (console.anthropic.com), gardée dans le téléphone et jamais mise dans les sauvegardes |
+| Sauvegarde | Sauvegarde chiffrée en ligne dans le bucket Supabase **`saves`** (`saves/monpressing/…`). Restaure aussi les **sauvegardes de Smart Pressing**. |
+
+Sans clé IA, tout marche quand même : la dictée, les idées de promotions, les profils, la date conseillée, la caisse
+et l'assistant fonctionnent avec des règles simples.
 
 ## Obtenir l'APK
-Chaque envoi sur `main` qui modifie `monpressing/` déclenche **Actions > Construire l'APK MonPressing** (environ 5 min).
-Le fichier `MonPressing.apk` apparaît dans **Releases** (versions `monpressing-v1.0.N`). Smart Pressing reste la version « Latest ».
-Les mises à jour s'installent par-dessus sans perdre les données (clé de signature : `android/app/monpressing.keystore`, ne la supprimez pas).
+**Actions > Construire l'APK MonPressing** se lance à chaque modification de `monpressing/`. L'APK `MonPressing.apk` apparaît dans
+**Releases** (versions `monpressing-v1.0.N`). Smart Pressing reste la version « Latest ».
+La clé de signature est `android/app/monpressing.keystore` : ne la supprimez pas, sinon les mises à jour ne s'installent plus.
 
-Version iPhone : **https://ori10.github.io/smart-pressing-app/monpressing/**, à ouvrir dans Safari puis « Sur l'écran d'accueil ».
+Version iPhone : https://ori10.github.io/smart-pressing-app/monpressing/
 
-## Premier démarrage
-1. Choisissez **Patron**, PIN **0000**, puis changez-le dans Paramètres.
-2. **Paramètres > Intelligence artificielle** : collez votre clé API Claude (console.anthropic.com). Chaque utilisation coûte
-   quelques francs, payés sur ce compte. Sans clé, l'appli marche quand même : la dictée, les relances, les promotions et
-   l'assistant ont un mode simple sans IA.
-3. **Paramètres > Sauvegarde automatique en ligne** : suivez le guide intégré. Il crée le bucket Supabase **`saves`** avec le code
-   SQL à copier ; renseignez ensuite l'adresse, la clé publique et un mot de passe de sauvegarde. Chaque soir à partir de 19 h,
-   la copie du jour part dans `saves/monpressing/sauvegarde-AAAA-MM-JJ.json`.
-4. Nouveau téléphone : écran de connexion > « Restaurer depuis internet » ou « Restaurer une sauvegarde ».
-
-## Structure
-```
-monpressing/
-  www/               l'application (HTML + CSS + JavaScript sans framework)
-    js/app.js        écrans et règles métier
-    js/ia.js         appels à l'IA (API Claude)
-    js/cloud.js      sauvegarde chiffrée dans Supabase (bucket « saves »)
-    js/db.js         stockage dans le téléphone (IndexedDB)
-    js/native.js     WhatsApp Business, partage, dictée vocale Android
-  android/           projet Android (Capacitor 7)
-```
-Essayer sur un ordinateur : `npx http-server monpressing/www -p 8081`.
+## Mettre à jour MonPressing avec les nouveautés de Smart Pressing
+Le code de Smart Pressing est copié tel quel dans `www/`. Les ajouts sont regroupés dans `js/plus.js` (règles) et `js/ia.js`
+(appels à l'IA). Dans `js/app.js`, ils sont branchés aux endroits marqués « MonPressing ».

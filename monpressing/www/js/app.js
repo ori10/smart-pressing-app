@@ -1,884 +1,1830 @@
-import { db as store } from './db.js';
-import { isNative, shareFile, shareText, waOpen, hasNativeSpeech, listenNative } from './native.js';
-import * as cloud from './cloud.js';
+import { db } from './db.js';
+import { SEED } from './seed.js';
+import * as L from './logic.js';
+import { invoicePdf, ticketPdf } from './pdf.js';
+import { bilanPdf, bilanXlsx, bilanFileName } from './export.js';
+import * as Charts from './charts.js';
+import * as Cloud from './cloud.js';
+import { shareFile, saveFile, openExternal, waNumber, isNative, scheduleMonthlyReminder, waOpen, waSendImage, scheduleReminderNotif, hasNativeSpeech, listenNative } from './native.js';
+import * as P from './plus.js';
 import { executer as iaExecuter } from './ia.js';
-/* =========================================================
-   MonPressing — gestion de pressing pour le Bénin
-   Données : dans le téléphone (IndexedDB) + sauvegarde chiffrée dans Supabase, bucket « saves »
-   ========================================================= */
+import { thanksCard } from './card.js';
+import { beep } from './scan.js';
 
-// ---------- Utilitaires ----------
+const { STATUS, STATUS_LABEL, STATUS_TONE, money, fmtDate, fmtShort, orderTotals, pieceCode, orderCode } = L;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const F = n => new Intl.NumberFormat('fr-FR').format(Math.round(n || 0)) + ' F';
-const ymd = d => { d = new Date(d); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
-const today = () => ymd(new Date());
-const dFR = d => d ? new Date(typeof d === 'string' && d.length === 10 ? d + 'T12:00' : d).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }) : '';
-const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
-const jours = t => Math.max(0, Math.floor((Date.now() - t) / 864e5));
-const JOURS = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi'];
-const MOIS = ['janv', 'févr', 'mars', 'avr', 'mai', 'juin', 'juil', 'août', 'sept', 'oct', 'nov', 'déc'];
-const STATUTS = { recu: 'Reçu', en_cours: 'En traitement', pret: 'Prêt', retire: 'Retiré' };
-const MODES = { especes: 'Espèces', mtn: 'MTN MoMo', moov: 'Moov Money', celtiis: 'Celtiis Cash', autre: 'Autre' };
-// Petites valeurs (utilisateur, réglages…) : copie en mémoire, enregistrée dans IndexedDB
-const KV = {};
-function safeGet(k, def) { return KV[k] === undefined || KV[k] === null ? def : KV[k]; }
-function safeSet(k, v) { KV[k] = v; store.kv(k, v).catch(e => console.warn('Enregistrement impossible', e)); }
-function setPath(o, p, v) { const k = p.split('.'); let x = o; while (k.length > 1) { const a = k.shift(); x = x[a] = x[a] || {}; } x[k[0]] = v; }
-function toast(t) { $$('.toast').forEach(x => x.remove()); const el = document.createElement('div'); el.className = 'toast'; el.textContent = t; document.body.appendChild(el); setTimeout(() => el.remove(), 3200); }
-function telIntl(t) { let d = String(t || '').replace(/\D/g, ''); if (!d) return ''; if (d.startsWith('00')) d = d.slice(2); if (d.startsWith('229') && d.length >= 11) return d; if (d.length === 10 && d.startsWith('01')) return '229' + d; if (d.length === 8) return '22901' + d; return d; }
-const wa = (tel, txt) => 'https://wa.me/' + telIntl(tel) + '?text=' + encodeURIComponent(txt || '');
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+let S = null;            // réglages en cache
+let unlocked = false;    // mode administrateur déverrouillé (jusqu'à fermeture de l'appli)
+let cleanup = null;      // fonction appelée en quittant un écran
+let connected = false;   // on passe par l'écran « Bienvenue » à chaque ouverture de l'appli
+let REG = [];            // fiches clients en cache
+const isAdmin = () => !S.adminPin || unlocked;
+
+// ---------------------------------------------------------------- outils d'affichage
 const ICONS = {
-  home: '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
-  plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
-  list: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
-  users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
-  menu: '<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>',
-  camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
-  mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>',
-  msg: '<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>',
-  truck: '<rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/>',
-  tag: '<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>',
-  card: '<rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/>',
-  spark: '<path d="M12 3l1.9 5.8L20 10l-6.1 1.2L12 17l-1.9-5.8L4 10l6.1-1.2z"/>',
-  drop: '<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
-  sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
-  print: '<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
-  x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-  cloud: '<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>',
-  vol: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>',
-  alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'
+  home: '<path d="M3 11l9-8 9 8v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  truck: '<path d="M1 4h14v12H1zM15 9h4l3 3v4h-7M5.5 19.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM18.5 19.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/>',
+  more: '<path d="M4 6h16M4 12h16M4 18h16"/>',
 };
-const ic = n => `<svg class="ico" viewBox="0 0 24 24">${ICONS[n] || ''}</svg>`;
+const icon = (k, sw = 2) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>`;
 
-// ---------- Données ----------
-const LS_DB = 'data', LS_CFG = 'cfg', LS_USER = 'user';
-const COLLS = ['clients', 'factures', 'promotions', 'journal', 'clotures'];
+function setNav(active) {
+  const items = [['home', '#/home', 'Accueil'], ['list', '#/orders', 'Commandes'], ['plus', '#/new', 'Facture'], ['truck', '#/deliveries', 'Livraisons'], ['more', '#/more', 'Plus']];
+  $('#nav').innerHTML = items.map(([k, h, t]) => k === 'plus'
+    ? `<a href="${h}" class="plus ${active === k ? 'on' : ''}"><span class="round">${icon('plus', 3)}</span>${t}</a>`
+    : `<a href="${h}" class="${active === k ? 'on' : ''}">${icon(k)}${t}</a>`).join('');
+  $('#nav').classList.toggle('hidden', active === 'none');
+}
 
-function defaultSettings() {
-  const cat = [['Chemise', 500, 2, false, 0], ['Pantalon', 500, 2, false, 0], ['Tee-shirt / Polo', 300, 2, false, 0], ['Jean', 600, 2, false, 0], ['Robe', 1000, 2, false, 0], ['Costume 2 pièces', 2500, 3, true, 1500], ['Veste', 1500, 3, true, 900], ['Boubou bazin', 2000, 3, true, 1200], ['Grand boubou', 2500, 3, true, 1500], ['Ensemble pagne', 1000, 2, false, 0], ['Robe de soirée', 3000, 3, true, 1800], ['Tenue de mariage', 5000, 4, true, 3000], ['Drap', 700, 2, false, 0], ['Couverture', 2000, 3, false, 0], ['Rideau', 1500, 3, false, 0], ['Cravate', 300, 2, false, 0]];
-  return {
-    id: 'settings', updatedAt: 0, nom: 'MonPressing', tel: '', adresse: '',
-    momo: { mtn: '', moov: '', celtiis: '' }, cousin: { nom: 'Le cousin', tel: '' },
-    expressMajoration: 50, capaciteJour: 40, moisPluies: [4, 5, 6, 7, 9, 10, 11],
-    catalogue: cat.map(([nom, prix, delai, cousin, coutCousin]) => ({ nom, prix, delai, cousin, coutCousin })),
-    users: [{ id: 'u_admin', nom: 'Patron', role: 'admin', pin: '0000' }]
-  };
+function setTop({ title, back, right = '' }) {
+  const logo = !back ? `<img class="logo" src="icons/icon-192.png" alt="">` : '';
+  $('#top').innerHTML = `${back ? `<button class="back" data-back="${back}" aria-label="Retour">←</button>` : ''}${logo}<div class="title">${esc(title)}</div>${right}`;
+  const b = $('[data-back]', $('#top'));
+  if (b) b.onclick = () => { location.hash = b.dataset.back; };
 }
-function loadDB(raw) {
-  const d = raw || {};
-  const e = { settings: { ...defaultSettings(), ...(d.settings || {}) } };
-  COLLS.forEach(c => e[c] = Array.isArray(d[c]) ? d[c] : []);
-  return e;
-}
-let db = loadDB();
-// Toutes les données sont gardées dans le téléphone (IndexedDB), enregistrées peu après chaque modification.
-let persistT = null;
-const persist = () => { clearTimeout(persistT); persistT = setTimeout(flush, 250); };
-function flush() { clearTimeout(persistT); return store.kv(LS_DB, db).catch(e => toast('Enregistrement impossible : ' + e.message)); }
-const all = c => db[c].filter(r => !r.deleted);
-const get = (c, id) => db[c].find(r => r.id === id && !r.deleted);
-function put(c, rec) {
-  if (!rec.id) rec.id = uid();
-  rec.updatedAt = Date.now();
-  const i = db[c].findIndex(r => r.id === rec.id);
-  if (i >= 0) db[c][i] = rec; else db[c].push(rec);
-  persist(); return rec;
-}
-function saveSettings() { db.settings.updatedAt = Date.now(); persist(); }
-function merge(a, b) {
-  const sa = a.settings || {}, sbb = b.settings || {};
-  const out = { settings: { ...defaultSettings(), ...((sa.updatedAt || 0) >= (sbb.updatedAt || 0) ? sa : sbb) } };
-  COLLS.forEach(c => {
-    const m = new Map();
-    [...(b[c] || []), ...(a[c] || [])].forEach(r => { const x = m.get(r.id); if (!x || (r.updatedAt || 0) > (x.updatedAt || 0)) m.set(r.id, r); });
-    out[c] = [...m.values()];
-  });
-  return out;
-}
-const signature = d => COLLS.map(c => d[c].length + ':' + d[c].reduce((m, r) => Math.max(m, r.updatedAt || 0), 0)).join('|') + '|' + (d.settings.updatedAt || 0);
-const cfg = () => ({ ia: true, iaKey: '', ...safeGet(LS_CFG, {}) });
-const setCfg = p => safeSet(LS_CFG, { ...cfg(), ...p });
 
-// ---------- Photos (IndexedDB, magasin « photos ») ----------
-const photoCache = {};
-async function photoSave(id, dataUrl) { photoCache[id] = dataUrl; await store.put('photos', dataUrl, id); }
-async function getPhoto(id) { if (photoCache[id]) return photoCache[id]; const v = await store.get('photos', id).catch(() => null); if (v) photoCache[id] = v; return v; }
-function loadPhotos() { $$('img[data-photo]').forEach(async img => { const s = await getPhoto(img.dataset.photo); if (s) img.src = s; else img.style.display = 'none'; }); }
-function compressImage(file, max = 1024, q = 0.72) {
-  return new Promise((res, rej) => {
-    const img = new Image(), url = URL.createObjectURL(file);
-    img.onload = () => {
-      let w = img.width, h = img.height; const s = Math.min(1, max / Math.max(w, h)); w = Math.round(w * s); h = Math.round(h * s);
-      const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'); x.drawImage(img, 0, 0, w, h);
-      // Horodatage incrusté = preuve de l'état au dépôt
-      x.fillStyle = 'rgba(0,0,0,.55)'; x.fillRect(0, h - 26, w, 26); x.fillStyle = '#fff'; x.font = '15px sans-serif';
-      x.fillText(db.settings.nom + ' · ' + new Date().toLocaleString('fr-FR'), 8, h - 8);
-      URL.revokeObjectURL(url); res(c.toDataURL('image/jpeg', q));
-    };
-    img.onerror = rej; img.src = url;
+function view(html) { const v = $('#view'); v.innerHTML = html; window.scrollTo(0, 0); return v; }
+
+let toastTimer;
+function toast(msg, err = false) {
+  const t = $('#toast');
+  t.textContent = msg; t.className = 'show' + (err ? ' err' : '');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = ''; }, 2600);
+}
+
+function ask({ title, text = '', ok = 'Confirmer', cancel = 'Annuler', danger = false, body = '', onOpen = null }) {
+  return new Promise((resolve) => {
+    const bg = document.createElement('div');
+    bg.className = 'modal-bg';
+    bg.innerHTML = `<div class="modal"><h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ''}${body}
+      <div class="btns" style="margin-top:12px"><button class="btn ghost" data-r="0">${esc(cancel)}</button>
+      <button class="btn ${danger ? 'danger' : 'primary'}" data-r="1">${esc(ok)}</button></div></div>`;
+    document.body.appendChild(bg);
+    if (onOpen) onOpen(bg);
+    bg.addEventListener('click', (e) => {
+      const r = e.target.closest('[data-r]');
+      if (e.target === bg || r) {
+        const val = r && r.dataset.r === '1' ? (body ? bg : true) : false;
+        resolve(val); setTimeout(() => bg.remove(), 0);
+      }
+    });
   });
 }
 
-// ---------- Sauvegarde en ligne (Supabase, bucket « saves ») ----------
-const getCloud = () => ({ enabled: false, url: '', key: '', password: '', ...safeGet('cloud', {}) });
-async function exportAll() {
-  await flush();
-  const photos = {};
-  for (const k of await store.keys('photos')) photos[k] = await store.get('photos', k);
-  return { app: 'monpressing', version: 1, exportedAt: new Date().toISOString(), data: db, photos };
-}
-async function importAll(d) {
-  if (!d || d.app !== 'monpressing' || !d.data) throw new Error('Ce fichier n’est pas une sauvegarde MonPressing.');
-  db = loadDB(d.data); await flush();
-  await store.clear('photos');
-  for (const [k, v] of Object.entries(d.photos || {})) await store.put('photos', v, k);
-  Object.keys(photoCache).forEach(k => delete photoCache[k]);
-}
-let backingUp = false;
-async function backupNow() {
-  const size = await cloud.uploadBackup(getCloud(), await exportAll(), today());
-  const r = { at: new Date().toISOString(), ok: true, size };
-  safeSet('cloudLast', r); safeSet('cloudLastOk', r.at); safeSet('lastExport', r.at);
-  return r;
-}
-// Automatique : chaque soir à partir de 19 h (ou dès l'ouverture si la dernière a plus de 36 h).
-async function autoBackup() {
-  const c = getCloud();
-  if (backingUp || !navigator.onLine || !c.enabled || !c.url || !c.key || !c.password) return;
-  const last = safeGet('cloudLast', {}), lastOk = safeGet('cloudLastOk', '');
-  const depuis = lastOk ? (Date.now() - new Date(lastOk).getTime()) / 3600e3 : 1e9, faitAujourdhui = lastOk && ymd(lastOk) === today();
-  if (!((new Date().getHours() >= 19 && !faitAujourdhui) || depuis > 36)) return;
-  if (last.ok === false && last.at && Date.now() - new Date(last.at).getTime() < 30 * 60e3) return; // pas d'acharnement
-  backingUp = true;
-  try { await backupNow(); } catch (e) { safeSet('cloudLast', { at: new Date().toISOString(), ok: false, error: e.message }); }
-  finally { backingUp = false; renderSyncBadge(); }
-}
-function syncBadge() {
-  if (!getCloud().enabled) return '';
-  const l = safeGet('cloudLast', null);
-  if (!l) return `<span class="pill mut">${ic('cloud')} Pas encore sauvegardé</span>`;
-  return l.ok ? `<span class="pill ok">${ic('cloud')} Sauvegardé ${dFR(l.at)}</span>` : `<a class="pill bad" href="#/parametres" title="${esc(l.error || '')}">Sauvegarde en échec</a>`;
-}
-function renderSyncBadge() { const el = $('#syncb'); if (el) el.innerHTML = syncBadge(); }
-const aiReady = () => navigator.onLine && cfg().ia !== false && !!cfg().iaKey;
-async function ai(task, payload) {
-  if (!aiReady()) throw new Error('IA indisponible (connexion ou clé API manquante)');
-  const c = cfg(); return iaExecuter(task, payload, { key: c.iaKey, texte: c.modeleTexte, vision: c.modeleVision });
+function showImage(src) {
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.style.alignItems = 'center';
+  bg.innerHTML = `<div style="padding:14px;max-width:600px;width:100%"><img class="photo-full" src="${src}"></div>`;
+  bg.onclick = () => bg.remove();
+  document.body.appendChild(bg);
 }
 
-// ---------- Voix ----------
-function ecouter(onText, onEnd) {
-  if (hasNativeSpeech) { toast('Parlez maintenant…'); listenNative().then(t => { if (t) onText(t); }).catch(e => toast('Micro : ' + (e.message || e))).finally(() => onEnd && onEnd()); return null; }
+function badge(o) { return `<span class="badge ${STATUS_TONE[o.status]}">${STATUS_LABEL[o.status]}</span>`; }
+
+function steps(o) {
+  const done = o.status === STATUS.LIVRE;
+  return `<div class="steps ${done ? 'done' : ''}">${[0, 1, 2, 3, 4, 5].map((i) => `<i class="${i <= o.status ? 'on' : ''}"></i>`).join('')}</div>`;
+}
+
+async function busy(btn, fn) {
+  const label = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '…';
+  try { return await fn(); }
+  catch (e) { console.error(e); toast(e.message || 'Erreur', true); }
+  finally { btn.disabled = false; btn.innerHTML = label; }
+}
+
+// ---------------------------------------------------------------- IA et voix (MonPressing)
+let IA = { key: '', on: true };   // clé API Claude, gardée dans ce téléphone (hors sauvegardes)
+const iaPrete = () => navigator.onLine && IA.on !== false && !!IA.key;
+async function ia(tache, donnees) {
+  if (!IA.key || IA.on === false) throw new Error('IA non configurée : Plus › Intelligence artificielle.');
+  if (!navigator.onLine) throw new Error('Pas de connexion internet pour l’IA.');
+  return iaExecuter(tache, donnees, { key: IA.key });
+}
+// Dictée : renvoie le texte entendu (Android : reconnaissance du téléphone ; sinon celle du navigateur).
+function ecouter() {
+  if (hasNativeSpeech) return listenNative();
   const R = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!R) { toast('Dictée vocale non disponible : utilisez Chrome sur Android, ou tapez le texte.'); return null; }
-  const r = new R(); r.lang = 'fr-FR'; r.interimResults = false; r.continuous = false;
-  r.onresult = e => onText([...e.results].map(x => x[0].transcript).join(' '));
-  r.onerror = e => toast('Micro : ' + e.error); r.onend = () => onEnd && onEnd();
-  try { r.start(); toast('Parlez maintenant…'); } catch { }
-  return r;
+  if (!R) return Promise.reject(new Error('Dictée non disponible ici : utilisez l’appli Android.'));
+  return new Promise((res, rej) => {
+    const r = new R(); r.lang = 'fr-FR';
+    r.onresult = (e) => res([...e.results].map((x) => x[0].transcript).join(' '));
+    r.onerror = (e) => rej(new Error('Micro : ' + e.error)); r.onend = () => res('');
+    try { r.start(); } catch (e) { rej(e); }
+  });
 }
-function parler(t) { try { const u = new SpeechSynthesisUtterance(t); u.lang = 'fr-FR'; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch { toast('Lecture vocale indisponible'); } }
+function parler(t) { try { const u = new SpeechSynthesisUtterance(t); u.lang = 'fr-FR'; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) { toast('Lecture vocale indisponible', true); } }
+const iaNote = (r) => [...(r.taches || []).map((x) => 'tache : ' + x), ...(r.degats || []).map((x) => 'dégât : ' + x)].join(', ');
+const findArt = (arts, nom) => arts.find((x) => x.name === nom) || arts.find((x) => x.name.toLowerCase() === String(nom || '').toLowerCase());
 
-// ---------- Logique métier ----------
-const currentUser = () => { const id = safeGet(LS_USER, null); return db.settings.users.find(u => u.id === id) || null; };
-const isAdmin = () => currentUser()?.role === 'admin';
-const userName = id => db.settings.users.find(u => u.id === id)?.nom || '—';
-const clientNom = id => get('clients', id)?.nom || 'Client inconnu';
-const catItem = n => db.settings.catalogue.find(c => c.nom === n) || db.settings.catalogue.find(c => norm(c.nom) === norm(n));
-const paye = f => (f.paiements || []).reduce((s, p) => s + (+p.montant || 0), 0);
-const reste = f => f.annulee ? 0 : Math.max(0, (f.total || 0) - paye(f));
-const factClient = cid => all('factures').filter(f => f.clientId === cid);
-const soldeClient = cid => factClient(cid).reduce((s, f) => s + reste(f), 0);
-const totalImpayes = () => all('factures').reduce((s, f) => s + reste(f), 0);
-const dernierPassage = cid => { const fs = factClient(cid).filter(f => f.type !== 'arriere'); return fs.length ? Math.max(...fs.map(f => f.createdAt)) : null; };
-function logJ(type, f, montant, info) { put('journal', { type, factureId: f?.id, numero: f?.numero, montant, info: info || '', user: currentUser()?.id, createdAt: Date.now() }); }
-const numeroFacture = () => 'MP' + today().slice(2).replace(/-/g, '') + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
+function fileSafe(s) { return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
 
-function promoBase(p, lignes) { const arts = p.articles || []; return lignes.filter(l => !arts.length || arts.includes(l.article)).reduce((s, l) => s + (+l.prix || 0) * (+l.qte || 0), 0); }
-function promoRemise(p, lignes) { const b = promoBase(p, lignes); if (!b || b < (+p.minimum || 0)) return 0; return p.type === 'pourcent' ? Math.round(b * p.valeur / 100) : Math.min(b, +p.valeur || 0); }
-function promoEnCours(p) { const d = today(); return p.actif && (!p.debut || d >= p.debut) && (!p.fin || d <= p.fin); }
-function promoActive(p, clientId, date = new Date()) {
-  if (!promoEnCours(p)) return false;
-  if (p.jours?.length && !p.jours.includes(date.getDay())) return false;
-  if (p.cible === 'nouveaux' && clientId && factClient(clientId).some(f => f.type !== 'arriere')) return false;
-  if (p.cible === 'inactifs') { if (!clientId) return false; const l = dernierPassage(clientId); if (!l || Date.now() - l < 60 * 864e5) return false; }
+// ---------------------------------------------------------------- carte de commande (liste)
+function lateBadge(o) {
+  const l = L.lateness(o);
+  if (l === 'late') return `<span class="badge red">⏰ En retard</span>`;
+  if (l === 'soon') return `<span class="badge orange">⏰ ${fmtShort(L.dueDate(o))}</span>`;
+  return '';
+}
+function payBadge(t) {
+  if (t.due <= 0) return '';
+  return t.paid > 0 ? ` <span class="badge orange">reste ${money(t.due)}</span>` : ' <span class="badge red">impayé</span>';
+}
+function orderCard(o, { showAction = true } = {}) {
+  const t = orderTotals(o);
+  const act = L.nextAction(o);
+  const late = L.lateness(o) === 'late';
+  return `<div class="card edge ${late ? 'late' : STATUS_TONE[o.status]}">
+    <div class="row between"><a href="#/order/${o.number}" style="text-decoration:none;color:inherit" class="grow"><b>N°${o.number} · ${esc(o.clientName)}</b></a>${badge(o)}</div>
+    ${steps(o)}
+    <div class="small muted">${esc(L.itemsSummary(o))}</div>
+    <div class="row between" style="margin-top:6px;flex-wrap:wrap;gap:6px"><span class="small">${t.pieces} pièce(s) ${lateBadge(o)}</span>
+      <b>${money(t.total)}${payBadge(t)}</b></div>
+    ${showAction ? `<div class="btns" style="margin-top:10px">
+      ${act ? `<button class="btn primary sm" data-act="${o.number}">${esc(act.label)}</button>` : '<span></span>'}
+      <a class="btn sm" href="#/order/${o.number}">Facture</a></div>` : ''}
+  </div>`;
+}
+
+// Exécute l'action principale d'une commande (depuis une liste ou la fiche).
+async function runAction(number, after) {
+  const o = await L.getOrder(number);
+  const act = L.nextAction(o);
+  if (!act) return;
+  if (act.kind === 'verify') { location.hash = `#/verify/${o.number}/${act.stage}`; return; }
+  if (act.kind === 'deliver') { await deliverFlow(o); after && after(); return; }
+  await L.advance(o, act.to);
+  toast(`N°${o.number} : ${STATUS_LABEL[act.to]}`);
+  after && after();
+}
+
+async function deliverFlow(o, cashedChecked = null) {
+  const t = orderTotals(o);
+  let cash = t.due <= 0;
+  if (t.due > 0) {
+    if (cashedChecked === null) {
+      const m = await ask({
+        title: `Livrer la commande N°${o.number} ?`, ok: 'Livré',
+        body: `<p>Total ${money(t.total)}${t.paid ? ` · déjà payé ${money(t.paid)}` : ''}<br>Reste à encaisser : <b>${money(t.due)}</b></p>
+          <label class="check"><input type="checkbox" id="m-paid"> ${money(t.due)} encaissés</label>`,
+      });
+      if (!m) return false;
+      cash = $('#m-paid', m).checked;
+    } else cash = cashedChecked;
+    if (!cash && !(await ask({ title: 'Pas encore payé ?', text: `La commande sera livrée mais ${money(t.due)} resteront dans les impayés.`, ok: 'Livrer quand même' }))) return false;
+    if (cash) await L.addPayment(o, t.due, 'À la livraison');
+  }
+  await L.advance(o, STATUS.LIVRE, cash ? '' : 'Livré non soldé');
+  toast(`N°${o.number} livrée`);
+  await offerThanks(o);
   return true;
 }
-const promoLib = p => p.type === 'pourcent' ? `−${p.valeur} %` : `−${F(p.valeur)}`;
-function promoConditions(p) {
-  const c = [];
-  if (p.jours?.length) c.push('le ' + p.jours.map(j => JOURS[j].toLowerCase()).join(', '));
-  if (p.debut || p.fin) c.push((p.debut ? 'du ' + dFR(p.debut) : '') + (p.fin ? ' au ' + dFR(p.fin) : ''));
-  if (p.articles?.length) c.push('sur ' + p.articles.join(', '));
-  if (p.cible === 'nouveaux') c.push('nouveaux clients'); if (p.cible === 'inactifs') c.push('clients inactifs depuis 2 mois');
-  if (+p.minimum) c.push('dès ' + F(p.minimum));
-  return c.join(' · ') || 'Tous les jours, tous les articles';
-}
-function usagePromo(id) { const fs = all('factures').filter(f => f.promoId === id && !f.annulee); return { n: fs.length, remise: fs.reduce((s, f) => s + (f.remisePromo || 0), 0) }; }
 
-function calcFacture(d) {
-  const S = db.settings; let st = 0;
-  d.lignes.forEach(l => st += (+l.prix || 0) * (+l.qte || 0));
-  const maj = d.express ? Math.round(st * S.expressMajoration / 100) : 0;
-  const p = d.promoId && get('promotions', d.promoId);
-  const rp = p ? promoRemise(p, d.lignes) : 0;
-  const rm = +d.remiseManuelle || 0, arr = +d.arriere?.montant || 0;
-  return { sousTotal: st, maj, remisePromo: rp, remiseManuelle: rm, arriere: arr, total: Math.max(0, st + maj - rp - rm) + arr };
+// Message « vos habits sont prêts » (Monsieur/Madame selon la fiche) et carte de remerciement.
+function waReady(o) { return L.readyMessage(o, REG, S); }
+function openWa(o, text) { return waOpen(o.clientPhone, text, S); }
+async function sendThanks(o, withCard = true) {
+  const orders = await db.all('orders');
+  const renewed = orders.filter((x) => x.clientId && x.clientId === o.clientId).length > 1;
+  const text = L.thanksMessage(o, REG, S, renewed);
+  if (!withCard) { const r = await openWa(o, text); o.thanksSentAt = L.nowIso(); await L.saveOrder(o); return r; }
+  const blob = await thanksCard({ s: S, civ: L.civility(o.clientSex), name: L.lastNameOf(o, REG), renewed });
+  const r = await waSendImage(blob, `Merci-${o.number}.png`, o.clientPhone, text, S);
+  if (r !== 'cancelled') { o.thanksSentAt = L.nowIso(); await L.saveOrder(o); }
+  return r;
 }
-function choosePromo(d) {
-  if (!d.promoAuto) return;
-  let best = null, bv = 0;
-  all('promotions').filter(p => promoActive(p, d.clientId)).forEach(p => { const v = promoRemise(p, d.lignes); if (v > bv) { bv = v; best = p; } });
-  d.promoId = best?.id || null;
+async function offerThanks(o) {
+  if (!o.clientPhone) return;
+  const m = await ask({ title: 'Envoyer le remerciement ?', ok: '📲 Envoyer', cancel: 'Plus tard',
+    body: `<p>Le message s'ouvre directement dans la conversation WhatsApp de ${esc(o.clientName)}.</p>
+      <button class="btn ghost block" id="m-card" type="button">💌 Avec la carte en image (choisir la conversation)</button>`,
+    onOpen: (bg) => { $('#m-card', bg).onclick = () => { bg.remove(); sendThanks(o, true); }; } });
+  if (m) await sendThanks(o, false);
 }
-function chargeEnCours() { return all('factures').filter(f => !f.annulee && ['recu', 'en_cours'].includes(f.statut)).reduce((s, f) => s + f.lignes.filter(l => !l.cousin).reduce((a, l) => a + (+l.qte || 0), 0), 0); }
-function suggestionCousin(article) {
-  const c = catItem(article), ch = chargeEnCours();
-  if (c?.cousin) return { oui: true, raison: 'habituellement confié au cousin' };
-  if (ch > db.settings.capaciteJour * 1.5) return { oui: true, raison: `atelier chargé : ${ch} pièces en cours` };
-  return { oui: false };
+
+// ---------------------------------------------------------------- relances des impayés
+let remindQueue = [];
+function reminderRow(g) {
+  return `<div class="rem-row" data-rk="${esc(g.key)}"><div class="grow"><b>${esc(g.name)}</b>
+      <div class="small muted">${money(g.total)} · ${g.items.map((x) => 'N°' + x.number).join(', ')}${g.count ? ` · déjà ${g.count} relance(s)` : ''}</div></div>
+    <button class="btn wa sm" data-remind="${esc(g.key)}">Relancer</button><button class="x" data-rsnooze="${esc(g.key)}" aria-label="Plus tard">✕</button></div>`;
 }
-function dateRetraitSuggeree(d) {
-  const S = db.settings, raisons = [];
-  let j = d.express ? 1 : Math.max(1, ...d.lignes.map(l => catItem(l.article)?.delai || 2));
-  if (!d.express) {
-    if (d.lignes.some(l => l.cousin)) { j += 1; raisons.push('+1 j cousin'); }
-    if (S.moisPluies.includes(new Date().getMonth() + 1)) { j += 1; raisons.push('+1 j saison des pluies'); }
-    const ch = chargeEnCours();
-    if (ch > S.capaciteJour) { const x = Math.min(3, Math.floor(ch / S.capaciteJour)); j += x; raisons.push(`+${x} j atelier chargé`); }
-  }
-  const dt = new Date(); let n = 0;
-  while (n < j) { dt.setDate(dt.getDate() + 1); if (dt.getDay() !== 0) n++; }
-  return { date: ymd(dt), raisons };
+async function sendReminder(g) {
+  await L.markReminded(g);
+  await waOpen(g.phone, L.reminderMessage(g, S), S);
 }
-function risqueClient(cid) {
-  const fs = factClient(cid).filter(f => !f.annulee), imp = fs.filter(f => reste(f) > 0);
-  const solde = imp.reduce((s, f) => s + reste(f), 0);
-  if (!solde) return { score: 0, label: 'À jour', cls: 'ok', solde: 0, jours: 0, nb: 0 };
-  const j = jours(Math.min(...imp.map(f => f.createdAt)));
-  const retires = imp.filter(f => f.statut === 'retire' && f.type !== 'arriere').length;
-  const payes = fs.filter(f => reste(f) === 0).length;
-  let score = Math.min(40, j) + imp.length * 8 + retires * 15 - Math.min(20, payes * 2) + (solde > 20000 ? 15 : solde > 5000 ? 8 : 0);
-  score = Math.max(0, Math.min(100, score));
-  return { score, label: score >= 60 ? 'Risque élevé' : score >= 30 ? 'À surveiller' : 'Bon payeur en retard', cls: score >= 60 ? 'bad' : score >= 30 ? 'warn' : 'ok', jours: j, solde, nb: imp.length };
-}
-function debiteurs() { return all('clients').map(c => ({ c, r: risqueClient(c.id) })).filter(x => x.r.solde > 0).sort((a, b) => b.r.score - a.r.score || b.r.solde - a.r.solde); }
-function infosPaiement() {
-  const m = db.settings.momo, p = [];
-  if (m.mtn) p.push('MTN MoMo ' + m.mtn); if (m.moov) p.push('Moov Money ' + m.moov); if (m.celtiis) p.push('Celtiis Cash ' + m.celtiis);
-  return p.length ? `Vous pouvez payer par ${p.join(', ')} (au nom de ${db.settings.nom}).` : '';
-}
-function momentRelance() {
-  const d = new Date().getDate();
-  return (d >= 25 || d <= 5) ? { bon: true, txt: 'Bon moment pour relancer : c\'est la période de paie (fin et début de mois).' } : { bon: false, txt: `Conseil : les relances marchent mieux entre le 25 et le 5 du mois (dans ${25 - d} jours).` };
-}
-function messageRelance(c, r, ton) {
-  const S = db.settings, p = infosPaiement();
-  if (ton === 'ferme') return `Bonjour ${c.nom}, ${S.nom} vous rappelle qu'un solde de ${F(r.solde)} reste impayé depuis ${r.jours} jours. Merci de le régler au plus vite. ${p}`.trim();
-  return `Bonjour ${c.nom}, ici ${S.nom}. Petit rappel amical : il reste ${F(r.solde)} à régler sur vos commandes. ${p} Merci pour votre fidélité et bonne journée !`.replace(/\s+/g, ' ').trim();
-}
-const resumeLignes = f => { const s = f.lignes.map(l => l.qte + ' ' + l.article).join(', '); return s.length > 70 ? s.slice(0, 67) + '…' : s; };
-function msgPret(f, c) { const r = reste(f); return `Bonjour ${c.nom}, vos habits (facture ${f.numero}) sont prêts chez ${db.settings.nom} ! ${r > 0 ? `Reste à payer : ${F(r)}. ${infosPaiement()}` : 'Tout est déjà payé, merci.'} Votre code de retrait : ${f.code}. À bientôt !`.replace(/\s+/g, ' '); }
-function msgRecu(f, c) {
-  const L = f.lignes.map(l => `- ${l.qte} × ${l.article} : ${F(l.montant)}`).join('\n');
-  return `${db.settings.nom} — Reçu ${f.numero}\nClient : ${c?.nom || ''}\n${L}${f.arriere ? `\n- Arriéré (${f.arriere.motif || 'ancien solde'}) : ${F(f.arriere.montant)}` : ''}\nTotal : ${F(f.total)}\nPayé : ${F(paye(f))}\nReste : ${F(reste(f))}\n${f.dateRetrait ? 'Retrait prévu : ' + dFR(f.dateRetrait) + '\n' : ''}Code de retrait : ${f.code}\nMerci de votre confiance !`;
-}
-function lignesCousin() { const o = []; all('factures').forEach(f => { if (f.annulee) return; f.lignes.forEach(l => { if (l.cousin) o.push({ f, l }); }); }); return o; }
-const sumQ = a => a.reduce((s, x) => s + (+x.l.qte || 0), 0);
-const piecesChezCousin = () => sumQ(lignesCousin().filter(x => x.l.cousinStatut === 'chez_cousin'));
-function statsCousin() {
-  const L = lignesCousin(), rev = L.filter(x => x.l.backAt && x.l.sentAt), dm = debutPeriode('mois');
-  return {
-    delai: rev.length ? Math.round(rev.reduce((s, x) => s + (x.l.backAt - x.l.sentAt) / 864e5, 0) / rev.length * 10) / 10 : null,
-    coutMois: L.filter(x => (x.l.sentAt || 0) >= dm).reduce((s, x) => s + (catItem(x.l.article)?.coutCousin || 0) * x.l.qte, 0)
+async function bindReminders(root, plan, after) {
+  // onclick (et non addEventListener) : l'écran est réutilisé, un seul gestionnaire à la fois.
+  root.onclick = async (e) => {
+    const b = e.target.closest('[data-remind]'), sn = e.target.closest('[data-rsnooze]'), all = e.target.closest('[data-remind-all]');
+    if (b) { const g = plan.due.find((x) => x.key === b.dataset.remind); if (g) { await sendReminder(g); after(); } }
+    if (sn) {
+      const g = plan.due.find((x) => x.key === sn.dataset.rsnooze); if (!g) return;
+      await L.markReminded(g, Number(S.remindEvery) || 7); toast(`${g.name} : relance reportée`); after();
+    }
+    if (all) { remindQueue = plan.due.slice(1); await sendReminder(plan.due[0]); after(); }
   };
 }
-function debutPeriode(per) { const d = new Date(); d.setHours(0, 0, 0, 0); if (per === 'semaine') d.setDate(d.getDate() - (d.getDay() + 6) % 7); if (per === 'mois') d.setDate(1); if (per === 'annee') d.setMonth(0, 1); return d.getTime(); }
-const LIBPER = { jour: "aujourd'hui", semaine: 'cette semaine', mois: 'ce mois', annee: 'cette année' };
-function encaisse(per, fin = Infinity, debut = null) {
-  const s = debut ?? debutPeriode(per); let enc = 0, nbP = 0, fact = 0, nbF = 0;
-  all('factures').forEach(f => {
-    if (f.annulee) return;
-    (f.paiements || []).forEach(p => { if (p.date >= s && p.date < fin) { enc += +p.montant; nbP++; } });
-    if (f.type !== 'arriere' && f.createdAt >= s && f.createdAt < fin) { fact += f.total; nbF++; }
-  });
-  return { enc, nbPaiements: nbP, fact, nbFact: nbF };
+// En revenant de WhatsApp, proposer le client suivant de la file.
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden || !remindQueue.length) return;
+  await new Promise((r) => setTimeout(r, 500));
+  const g = remindQueue[0];
+  const ok = await ask({ title: `Relancer ${g.name} ?`, text: `${money(g.total)} dus · encore ${remindQueue.length} client(s) dans la file.`, ok: '📲 Relancer', cancel: 'Arrêter' });
+  if (!ok) { remindQueue = []; render(); return; }
+  remindQueue.shift();
+  await sendReminder(g);
+  render();
+});
+async function refreshReminderNotif(plan) {
+  if (!isNative) return;
+  scheduleReminderNotif(plan.due.length ? new Date() : plan.nextAt, plan.due.length || 1, Number(S.remindHour) || 10);
 }
-function cashAttendu(day) {
-  let esp = 0, momo = 0;
-  all('factures').forEach(f => { if (f.annulee) return; (f.paiements || []).forEach(p => { if (ymd(p.date) !== day) return; if (p.mode === 'especes') esp += +p.montant; else if (['mtn', 'moov', 'celtiis'].includes(p.mode)) momo += +p.montant; }); });
-  return { esp, momo };
+
+// ---------------------------------------------------------------- bilan mensuel automatique
+async function reportBlob(p, fmt) {
+  const b = L.computeBilan(await db.all('orders'), await db.all('expenses'), p, S);
+  return fmt === 'pdf' ? bilanPdf(b, p, S) : bilanXlsx(b, p, S);
 }
-function anomalies() {
-  const res = [], since = Date.now() - 30 * 864e5, by = {};
-  const U = id => by[id] = by[id] || { n: 0, ann: 0, rem: 0 };
-  all('factures').filter(f => f.createdAt > since && f.type !== 'arriere').forEach(f => { U(f.createdBy).n++; if ((+f.remiseManuelle || 0) > 0) U(f.createdBy).rem++; if (f.annulee) U(f.annuleBy || f.createdBy).ann++; });
-  Object.entries(by).forEach(([u, s]) => {
-    const n = Math.max(1, s.n);
-    if (s.ann >= 3 && s.ann / n > 0.1) res.push({ niveau: 'haut', txt: `${userName(u)} a annulé ${s.ann} factures ces 30 derniers jours (${Math.round(s.ann / n * 100)} % de ses factures).` });
-    if (s.rem >= 3 && s.rem / n > 0.2) res.push({ niveau: 'moyen', txt: `${userName(u)} a accordé une remise manuelle sur ${s.rem} factures sur ${s.n}.` });
-  });
-  all('clotures').filter(c => c.createdAt > since).forEach(c => {
-    const e = (c.especesDeclarees || 0) - (c.especesAttendues || 0);
-    if (Math.abs(e) >= 500) res.push({ niveau: e < 0 ? 'haut' : 'moyen', txt: `Caisse du ${dFR(c.date)} (${userName(c.user)}) : écart espèces de ${F(e)} (compté ${F(c.especesDeclarees)}, attendu ${F(c.especesAttendues)}).` });
-    if (c.momoDeclare !== null && c.momoDeclare !== undefined) { const m = c.momoDeclare - (c.momoAttendu || 0); if (Math.abs(m) >= 500) res.push({ niveau: 'moyen', txt: `Mobile Money du ${dFR(c.date)} : écart de ${F(m)} (reçu ${F(c.momoDeclare)}, enregistré ${F(c.momoAttendu)}).` }); }
-  });
-  const rnp = all('journal').filter(j => j.type === 'retrait_impaye' && j.createdAt > since);
-  if (rnp.length >= 3) res.push({ niveau: 'moyen', txt: `${rnp.length} commandes ont été remises au client sans paiement complet ces 30 derniers jours.` });
-  return res;
-}
-// Calendrier béninois pour les promotions
-function paques(y) { const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451), mo = Math.floor((h + l - 7 * m + 114) / 31), da = ((h + l - 7 * m + 114) % 31) + 1; return new Date(y, mo - 1, da); }
-const FETES_MUSULMANES = { 2026: [['Tabaski', 4, 27]], 2027: [['Ramadan (Korité)', 2, 10], ['Tabaski', 4, 17]], 2028: [['Ramadan (Korité)', 1, 27], ['Tabaski', 4, 5]] };
-function evenements(y) {
-  const T = ['Boubou bazin', 'Grand boubou', 'Ensemble pagne'];
-  const ev = [
-    { nom: 'Fête du Vodoun', date: new Date(y, 0, 10), avant: 10, promo: 'Spécial 10 janvier', pourquoi: 'beaucoup de tenues traditionnelles à préparer.', articles: T },
-    { nom: 'Pâques', date: paques(y), avant: 10, promo: 'Tenues de Pâques', pourquoi: 'les familles préparent leurs tenues pour l\'église.' },
-    { nom: 'Fête de l\'Indépendance', date: new Date(y, 7, 1), avant: 10, promo: 'Spécial 1er août', pourquoi: 'défilés, cérémonies et sorties.' },
-    { nom: 'Rentrée scolaire', date: new Date(y, 8, 14), avant: 14, promo: 'Uniformes de rentrée', pourquoi: 'les parents font laver uniformes et tenues.', approx: true, articles: ['Chemise', 'Pantalon', 'Robe'] },
-    { nom: 'Fêtes de fin d\'année', date: new Date(y, 11, 24), avant: 21, promo: 'Fêtes de fin d\'année', pourquoi: 'pic de mariages, sorties et tenues de fête.' }
-  ];
-  (FETES_MUSULMANES[y] || []).forEach(([n, m, d]) => ev.push({ nom: n, date: new Date(y, m, d), avant: 10, promo: 'Spécial ' + n, pourquoi: 'beaucoup de boubous et tenues à préparer.', approx: true, articles: T }));
-  return ev;
-}
-function evenementsProches(n) { const y = new Date().getFullYear(), now = Date.now(); return [...evenements(y), ...evenements(y + 1)].filter(e => e.date.getTime() >= now - 864e5 && e.date.getTime() <= now + n * 864e5).sort((a, b) => a.date - b.date); }
-function suggestionsPromos() {
-  const sug = [], fs = all('factures').filter(f => !f.annulee && f.type !== 'arriere' && f.createdAt > Date.now() - 56 * 864e5);
-  if (fs.length >= 10) {
-    const by = [0, 0, 0, 0, 0, 0, 0]; fs.forEach(f => by[new Date(f.createdAt).getDay()] += f.total);
-    const open = [1, 2, 3, 4, 5, 6], min = open.reduce((a, b) => by[b] < by[a] ? b : a), avg = open.reduce((s, d) => s + by[d], 0) / 6;
-    if (avg && by[min] < avg * 0.7) sug.push({ nom: JOURS[min] + ' malin', type: 'pourcent', valeur: 15, jours: [min], cible: 'tous', raison: `Le ${JOURS[min].toLowerCase()} est votre jour le plus calme (${Math.round(by[min] / avg * 100)} % de la moyenne).` });
+// Android : range une copie PDF + Excel dans Documents/MonPressing/Bilans (une seule fois par période).
+async function archiveReports(reports) {
+  if (!isNative) return;
+  for (const p of reports) {
+    const k = 'reportArchived:' + L.reportKey(p);
+    if (await db.kv(k)) continue;
+    try {
+      for (const fmt of ['pdf', 'xlsx']) await saveFile(await reportBlob(p, fmt), bilanFileName(p, fmt), { folder: 'MonPressing/Bilans', silent: true });
+      await db.kv(k, L.nowIso());
+      toast(`📊 Bilan ${p.label} rangé dans Documents`);
+    } catch (e) { console.warn(e); }
   }
-  const inact = all('clients').filter(c => { const l = dernierPassage(c.id); return l && Date.now() - l > 60 * 864e5; });
-  if (inact.length >= 3) sug.push({ nom: 'On vous a manqué', type: 'pourcent', valeur: 20, cible: 'inactifs', fin: ymd(Date.now() + 30 * 864e5), raison: `${inact.length} clients ne sont pas revenus depuis plus de 2 mois.` });
-  evenementsProches(45).forEach(e => sug.push({ nom: e.promo, type: 'pourcent', valeur: 10, debut: ymd(Math.max(Date.now(), e.date.getTime() - e.avant * 864e5)), fin: ymd(e.date), cible: 'tous', articles: e.articles || [], raison: `${e.nom} le ${dFR(e.date)}${e.approx ? ' (date approximative)' : ''} : ${e.pourquoi}` }));
-  const m = new Date().getMonth() + 1;
-  if (m === 11 || m === 12) sug.push({ nom: 'Forfait cérémonie', type: 'pourcent', valeur: 10, cible: 'tous', articles: ['Tenue de mariage', 'Robe de soirée', 'Grand boubou', 'Boubou bazin'], minimum: 5000, fin: ymd(new Date(new Date().getFullYear(), 11, 31)), raison: 'Saison des mariages et cérémonies : fidélisez les familles qui apportent plusieurs tenues.' });
-  if (!all('factures').length) sug.push({ nom: 'Bienvenue', type: 'pourcent', valeur: 10, cible: 'nouveaux', raison: 'Attirer de nouveaux clients avec −10 % sur leur premier dépôt.' });
-  return sug;
 }
-function topArticles(days) { const m = {}; all('factures').filter(f => !f.annulee && f.createdAt > Date.now() - days * 864e5).forEach(f => f.lignes.forEach(l => m[l.article] = (m[l.article] || 0) + (+l.qte || 0))); return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([article, pieces]) => ({ article, pieces })); }
-function topClients(days) { const m = {}; all('factures').filter(f => !f.annulee && f.type !== 'arriere' && f.createdAt > Date.now() - days * 864e5).forEach(f => m[f.clientId] = (m[f.clientId] || 0) + f.total); return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id, total]) => ({ nom: clientNom(id), total })); }
-function resumeDonnees() {
-  const fs = all('factures').filter(f => !f.annulee), cs = statsCousin(), L = lignesCousin(), mois = [];
-  for (let i = 5; i >= 0; i--) { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); d.setMonth(d.getMonth() - i); const f = new Date(d); f.setMonth(f.getMonth() + 1); const e = encaisse(null, f.getTime(), d.getTime()); mois.push({ mois: MOIS[d.getMonth()] + ' ' + d.getFullYear(), facture: e.fact, encaisse: e.enc }); }
-  return {
-    pressing: db.settings.nom, date: today(),
-    encaisse: { jour: encaisse('jour'), semaine: encaisse('semaine'), mois: encaisse('mois'), annee: encaisse('annee') },
-    par_mois: mois, impayes_total: totalImpayes(),
-    debiteurs: debiteurs().slice(0, 10).map(d => ({ nom: d.c.nom, doit: d.r.solde, jours: d.r.jours, profil: d.r.label })),
-    commandes: { recues: fs.filter(f => f.statut === 'recu' && f.type !== 'arriere').length, en_traitement: fs.filter(f => f.statut === 'en_cours').length, pretes_non_retirees: fs.filter(f => f.statut === 'pret').length },
-    cousin: { a_envoyer: sumQ(L.filter(x => x.l.cousinStatut === 'a_envoyer')), chez_cousin: piecesChezCousin(), delai_moyen_jours: cs.delai, cout_ce_mois: cs.coutMois },
-    meilleurs_clients_90j: topClients(90), articles_90j: topArticles(90), nb_clients: all('clients').length,
-    promotions_actives: all('promotions').filter(promoEnCours).map(p => p.nom + ' ' + promoLib(p)), alertes: anomalies().map(a => a.txt)
+
+// ---------------------------------------------------------------- écrans
+const routes = {};
+
+routes.welcome = async () => {
+  setNav('none');
+  setTop({ title: 'Premier démarrage' });
+  const v = view(`<div class="welcome">
+    <h1>Vos données</h1>
+    <p class="muted">Toutes vos données restent dans ce téléphone.<br>Pas besoin d'internet.</p></div>
+    <div class="card stack">
+      <button class="btn primary big block" id="w-hist">Reprendre mes données</button>
+      <p class="small muted" style="margin:0">Réglages et grille de ${SEED.articles.length} articles${SEED.orders.length ? ` + les factures déjà émises (N°${SEED.orders.map((o) => o.number).join(', N°')})` : ''}.</p>
+      <button class="btn ghost block" id="w-empty">Démarrer avec seulement la grille de prix</button>
+      <label class="btn ghost block">Restaurer une sauvegarde (MonPressing ou Smart Pressing)…<input type="file" accept=".json,application/json,text/plain" id="w-file" hidden></label>
+      <a class="btn ghost block" href="#/cloud">☁️ Restaurer depuis internet</a>
+    </div>`);
+  $('#w-hist', v).onclick = async () => { await L.initialize(true); location.hash = '#/home'; boot(); };
+  $('#w-empty', v).onclick = async () => { await L.initialize(false); location.hash = '#/home'; boot(); };
+  $('#w-file', v).onchange = (e) => restoreFrom(e.target.files[0]);
+};
+
+routes.login = async () => {
+  setNav('none');
+  $('#top').classList.add('hidden');
+  document.body.classList.add('white');
+  const v = view(`<div class="login">
+      ${S.logo ? `<img class="login-logo" src="${S.logo}" alt="">` : '<div class="mark">MP</div>'}
+      <p class="login-hello">Bienvenue</p>
+      ${S.logo ? '' : `<h1>${esc(S.name || 'MonPressing')}</h1>`}
+      <p class="muted">${esc(S.city || 'Gestion de pressing')}</p>
+      <button class="btn primary big block" id="l-go">Se connecter</button>
+    </div>`);
+  $('#l-go', v).onclick = () => {
+    connected = true;
+    $('#top').classList.remove('hidden');
+    document.body.classList.remove('white');
+    const h = location.hash.replace(/^#\/?/, '');
+    if (!h || h.startsWith('login')) location.hash = '#/home'; else render();
   };
-}
-function resumeHebdo() {
-  const s = debutPeriode('semaine'), cur = encaisse(null, Infinity, s), prev = encaisse(null, s, s - 7 * 864e5);
-  const evo = prev.enc ? Math.round((cur.enc - prev.enc) / prev.enc * 100) : null, deb = debiteurs().slice(0, 3), an = anomalies();
-  return `Résumé de la semaine (depuis lundi) — ${db.settings.nom}\n• Encaissé : ${F(cur.enc)}${evo !== null ? ` (${evo >= 0 ? '+' : ''}${evo} % par rapport à toute la semaine dernière)` : ''}\n• Nouvelles factures : ${cur.nbFact} pour ${F(cur.fact)}\n• Impayés au total : ${F(totalImpayes())}${deb.length ? '\n• Ceux qui doivent le plus : ' + deb.map(d => `${d.c.nom} (${F(d.r.solde)})`).join(', ') : ''}\n• Pièces chez le cousin : ${piecesChezCousin()}\n• Alertes de caisse : ${an.length || 'aucune'}`;
-}
-function repondreLocal(q) {
-  const t = norm(q), per = /aujourd|ce jour/.test(t) ? 'jour' : /semaine/.test(t) ? 'semaine' : /annee|cette an/.test(t) ? 'annee' : 'mois';
-  if (/resume|bilan/.test(t)) return resumeHebdo();
-  if (/gagne|chiffre|recette|encaiss|vendu|revenu|argent/.test(t)) { const r = encaisse(per); return `Encaissé ${LIBPER[per]} : ${F(r.enc)} (${r.nbPaiements} paiements).\nFacturé ${LIBPER[per]} : ${F(r.fact)} sur ${r.nbFact} factures.`; }
-  if (/doit|dette|impaye|arriere|credit/.test(t)) { const d = debiteurs(); return d.length ? `Impayés au total : ${F(totalImpayes())}.\n` + d.slice(0, 5).map((x, i) => `${i + 1}. ${x.c.nom} : ${F(x.r.solde)} (${x.r.label}, ${x.r.jours} j)`).join('\n') : 'Personne ne vous doit d\'argent. Bravo !'; }
-  if (/cousin|sous.?trait/.test(t)) { const L = lignesCousin(), s = statsCousin(); return `Chez le cousin : ${piecesChezCousin()} pièce(s). À envoyer : ${sumQ(L.filter(x => x.l.cousinStatut === 'a_envoyer'))}.\nDélai moyen : ${s.delai ?? '—'} jours. Coût ce mois : ${F(s.coutMois)}.`; }
-  if (/pret|retir|attente/.test(t)) { const p = all('factures').filter(f => !f.annulee && f.statut === 'pret'); return p.length ? `${p.length} commande(s) prête(s) à retirer :\n` + p.slice(0, 10).map(f => `• ${clientNom(f.clientId)} — ${f.numero} (reste ${F(reste(f))})`).join('\n') : 'Aucune commande prête en attente.'; }
-  if (/client/.test(t) && /meilleur|fidele|top|plus gros/.test(t)) { const c = topClients(90); return c.length ? 'Meilleurs clients (90 jours) :\n' + c.map((x, i) => `${i + 1}. ${x.nom} : ${F(x.total)}`).join('\n') : 'Pas encore assez de données.'; }
-  return null;
-}
-const NOMBRES = { un: 1, une: 1, deux: 2, trois: 3, quatre: 4, cinq: 5, six: 6, sept: 7, huit: 8, neuf: 9, dix: 10, onze: 11, douze: 12, quinze: 15, vingt: 20 };
-function parseDictee(txt) {
-  const t = norm(txt), res = { lignes: [], express: /express|urgent/.test(t), client: null };
-  const cat = [...db.settings.catalogue].sort((a, b) => b.nom.length - a.nom.length);
-  t.split(/,|;|\bet\b|\bpuis\b|\bplus\b/).forEach(seg => {
-    seg = seg.trim(); if (!seg) return;
-    const sing = seg.replace(/s\b/g, '');
-    let it = cat.find(c => seg.includes(norm(c.nom)) || sing.includes(norm(c.nom).replace(/s\b/g, '')));
-    if (!it) it = cat.find(c => { const w = norm(c.nom).split(/[\s/]+/)[0]; return w.length > 3 && new RegExp('\\b' + w + 's?\\b').test(seg); });
-    if (!it) return;
-    const rest = seg.replace(norm(it.nom), ' ');
-    let q = 1; const m = rest.match(/\b(\d+)\b/);
-    if (m) q = +m[1]; else for (const [w, v] of Object.entries(NOMBRES)) if (new RegExp('\\b' + w + '\\b').test(rest)) { q = v; break; }
-    res.lignes.push({ article: it.nom, qte: q });
+};
+
+routes.home = async () => {
+  setNav('home');
+  const lockBtn = S.adminPin ? `<button class="pill" id="lockbtn">${unlocked ? 'Admin ✓' : 'Admin'}</button>` : '';
+  setTop({ title: S.name || 'MonPressing', right: lockBtn });
+  if ($('#lockbtn')) $('#lockbtn').onclick = () => { if (unlocked) { unlocked = false; toast('Mode admin verrouillé'); render(); } else location.hash = '#/unlock?next=home'; };
+  const c = await L.counts();
+  const last = await db.kv('lastBackup');
+  const total = await db.count('orders');
+  let backupNote = '';
+  const cloudCfg = await Cloud.getCloud();
+  const cloudOkAt = await db.kv('cloudLastOk');
+  if (cloudCfg.enabled) {
+    const h = cloudOkAt ? (Date.now() - new Date(cloudOkAt).getTime()) / 3600e3 : 999;
+    if (h > 48) backupNote = `<a href="#/backup" class="note" style="display:block;text-decoration:none;margin-bottom:12px">⚠️ La sauvegarde en ligne n'est pas passée depuis ${cloudOkAt ? Math.floor(h / 24) + ' jours' : 'son activation'}. Ouvrez l'appli avec internet ou vérifiez la configuration.</a>`;
+  } else if (total > 0) {
+    const days = last ? Math.floor((Date.now() - new Date(last).getTime()) / 864e5) : null;
+    if (days === null || days >= 7) backupNote = `<a href="#/backup" class="note" style="display:block;text-decoration:none;margin-bottom:12px">⚠️ ${days === null ? 'Aucune sauvegarde faite.' : `Dernière sauvegarde il y a ${days} jours.`} Toutes les données sont dans ce téléphone : faites une sauvegarde.</a>`;
+  }
+  const reports = await L.pendingReports(S);
+  const plan = L.reminderPlan(await db.all('orders'), REG, S);
+  refreshReminderNotif(plan);
+  const reportCards = reports.map((p) => isAdmin()
+    ? `<div class="card report" data-rk="${p.kind}:${p.offset}"><div class="row between"><b>📊 Bilan ${p.kind === 'year' ? 'de l’' + p.label.toLowerCase() : 'de ' + p.label.toLowerCase()} prêt</b><button class="x" data-mr="later" aria-label="Plus tard">✕</button></div>
+        <p class="small muted" style="margin:4px 0 10px">${isNative ? 'Une copie est rangée dans Documents/MonPressing/Bilans. ' : ''}Envoyez-le en un toucher (WhatsApp, e-mail…).</p>
+        <div class="btns three"><button class="btn navy sm" data-mr="pdf">PDF</button><button class="btn green sm" data-mr="xlsx">Excel</button><button class="btn sm" data-mr="view">Voir</button></div>
+        <button class="btn sm ghost block" data-mr="done" style="margin-top:8px">C'est fait, ne plus afficher</button></div>`
+    : `<a href="#/unlock?next=home" class="note" style="display:block;text-decoration:none;margin-bottom:12px">📊 Le bilan ${p.kind === 'year' ? 'de l’année' : 'du mois'} est prêt (mode admin).</a>`).join('');
+  const now = new Date();
+  const hello = now.getHours() < 18 ? 'Bonjour' : 'Bonsoir';
+  const al = isAdmin() ? await P.alertes(await db.all('orders')) : [];
+  const alertesHtml = al.length ? `<div class="card edge late"><b style="color:var(--red)">🚨 À vérifier</b>${al.map((a) => `<p class="small" style="margin:6px 0 0">• ${esc(a.txt)}</p>`).join('')}<a class="small" href="#/caisse">Caisse du jour ›</a></div>` : '';
+  const hv = view(`<h1>${hello} 👋</h1>
+    <p class="muted" style="margin:4px 0 14px">${fmtDate(L.todayIso(), false)} · ${c.open} commande(s) en cours</p>
+    ${backupNote}
+    ${alertesHtml}
+    ${reportCards}
+    ${plan.due.length ? `<div class="card rem"><div class="row between"><b>💬 Relances à faire (${plan.due.length})</b><a class="small" href="#/reminders">Tout voir</a></div>
+      ${plan.due.slice(0, 3).map(reminderRow).join('')}
+      ${plan.due.length > 1 ? `<button class="btn wa block" data-remind-all style="margin-top:10px">📲 Relancer tout le monde (${plan.due.length})</button>` : ''}</div>` : ''}
+    <a class="btn primary big block" href="#/new" style="margin-bottom:14px">+ Nouvelle facture</a>
+    ${c.late.length ? `<div class="card edge late"><b style="color:var(--red)">⏰ ${c.late.length} commande(s) en retard</b>${c.late.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)}</span><span>promis ${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
+    ${c.soon.length ? `<div class="card edge orange"><b style="color:#a65200">À rendre dans les 24 h : ${c.soon.length}</b>${c.soon.slice(0, 6).map((o) => `<a class="late-row" href="#/order/${o.number}"><span>N°${o.number} · ${esc(o.clientName)} · ${STATUS_LABEL[o.status]}</span><span>${fmtShort(L.dueDate(o))}</span></a>`).join('')}</div>` : ''}
+    <div class="tiles">
+      <a class="tile orange" href="#/orders?s=0"><b>${c.byStatus[0]}</b><span>À envoyer au cousin</span></a>
+      <a class="tile blue" href="#/orders?s=1"><b>${c.byStatus[1]}</b><span>Chez le cousin</span></a>
+      <a class="tile orange" href="#/ironing"><b>${c.byStatus[2]}</b><span>À repasser</span></a>
+      <a class="tile orange" href="#/orders?s=3"><b>${c.byStatus[3]}</b><span>À vérifier</span></a>
+      <a class="tile green" href="#/deliveries"><b>${c.byStatus[4]}</b><span>Prêtes</span></a>
+      <a class="tile navy" href="#/orders?s=today"><b>${c.todayCount}</b><span>Factures du jour</span></a>
+      ${c.claims ? `<a class="tile red wide" href="#/claims"><b>${c.claims}</b><span>Réclamation(s) à régler</span></a>` : ''}
+      <a class="tile green wide" href="#/caisse"><b>💵 Caisse</b><span>Clôturer la caisse du jour</span></a>
+      ${isAdmin() ? `<a class="tile navy wide" href="#/bilan"><b>${money(c.todayCA)}</b><span>Chiffre d'affaires du jour</span></a>` : ''}
+    </div>`);
+  $$('.report', hv).forEach((card) => {
+    const [kind, off] = card.dataset.rk.split(':');
+    const p = L.period(kind, Number(off));
+    card.onclick = async (e) => {
+      const b = e.target.closest('[data-mr]'); if (!b) return;
+      const act = b.dataset.mr;
+      if (act === 'later') { await db.kv('reportSnooze', L.todayIso()); toast('Rappel demain'); return routes.home(); }
+      if (act === 'done') { await db.kv('reportDone:' + L.reportKey(p), true); return routes.home(); }
+      if (act === 'view') { location.hash = `#/bilan?k=${kind}&o=${off}`; return; }
+      await busy(b, async () => {
+        const blob = await reportBlob(p, act);
+        const r = await shareFile(blob, bilanFileName(p, act), 'Bilan ' + p.label);
+        if (r !== 'cancelled') { await db.kv('reportSent:' + L.reportKey(p), L.nowIso()); toast('Bilan envoyé'); }
+      });
+    };
   });
-  const cl = all('clients').find(c => norm(c.nom).length > 2 && t.includes(norm(c.nom))) || all('clients').find(c => norm(c.nom).split(/\s+/).some(p => p.length > 3 && new RegExp('\\b' + p + '\\b').test(t)));
-  if (cl) res.client = cl.nom; else { const mc = t.match(/pour (?:madame|monsieur|mme|mr|mademoiselle|mlle|maman|papa|tonton|tata)?\s*([a-z\- ]{2,40}?)(?:,|\.|$| avec| express)/); if (mc) res.client = mc[1].trim().replace(/\b\w/g, x => x.toUpperCase()); }
-  return res;
-}
-
-// ---------- Modales ----------
-function modal(html) { $('#modal').innerHTML = `<div class="modal" data-act="modalBg"><div>${html}</div></div>`; }
-function closeModal() { $('#modal').innerHTML = ''; }
-function confirmBox(msg, oui = 'Oui', non = 'Non') { return new Promise(res => { modal(`<p style="font-size:16px">${esc(msg)}</p><div class="row" style="margin-top:12px"><button class="btn p" id="cbY">${oui}</button><button class="btn" id="cbN">${non}</button></div>`); $('#cbY').onclick = () => { closeModal(); res(true); }; $('#cbN').onclick = () => { closeModal(); res(false); }; }); }
-function promptBox(msg, type = 'text') { return new Promise(res => { modal(`<form id="pbF"><label style="font-size:15px;color:var(--ink)">${esc(msg)}</label><input id="pbI" type="${type}" autocomplete="off"><div class="row" style="margin-top:12px"><button class="btn p">Valider</button><button type="button" class="btn" id="pbN">Annuler</button></div></form>`); const i = $('#pbI'); i.focus(); $('#pbF').onsubmit = e => { e.preventDefault(); e.stopPropagation(); const v = i.value.trim(); closeModal(); res(v || null); }; $('#pbN').onclick = () => { closeModal(); res(null); }; }); }
-function waModal(titre, txt, tel, rel) { return `<h2>${esc(titre)}</h2><textarea id="mtxt" rows="8">${esc(txt)}</textarea><div class="row" style="margin-top:10px"><a class="btn p" href="#" target="_blank" rel="noopener" data-act="sendWa" data-wa="${esc(tel || '')}" ${rel ? `data-rel="${rel}"` : ''}>${ic('msg')}Envoyer sur WhatsApp</a><button class="btn" data-act="copyTxt">Copier</button><button class="btn" data-act="closeModal">Fermer</button></div>${tel ? '' : '<p class="mut" style="font-size:13px">Pas de numéro : WhatsApp vous laissera choisir le contact.</p>'}`; }
-
-// ---------- Écran & navigation ----------
-const state = { view: 'accueil', param: null, draft: null, cq: '', q: '', clq: '', filtre: 'actives', chat: [], sugs: [], sugsIA: [], detPhoto: null };
-const go = (v, p) => { location.hash = '#/' + v + (p ? '/' + p : ''); };
-function route() { const [v, p] = location.hash.replace(/^#\/?/, '').split('/'); state.view = v || 'accueil'; state.param = p || null; closeModal(); render(); window.scrollTo(0, 0); }
-const NAV = [['accueil', 'Accueil', 'home'], ['nouvelle', 'Nouvelle facture', 'plus'], ['commandes', 'Commandes', 'list'], ['clients', 'Clients', 'users'], ['recouvrement', 'Recouvrement', 'card'], ['cousin', 'Cousin', 'truck'], ['promos', 'Promotions', 'tag', true], ['assistant', 'Assistant du patron', 'spark', true], ['detachage', 'Détachage', 'drop'], ['parametres', 'Paramètres', 'sliders']];
-function shell(c) {
-  const u = currentUser(), v = state.view, main4 = ['accueil', 'nouvelle', 'commandes', 'clients'];
-  return `<div class="shell"><nav class="side"><div class="brand">${ic('drop')} MonPressing</div>${NAV.filter(n => !n[3] || isAdmin()).map(n => `<a href="#/${n[0]}" class="${v === n[0] || (v === 'facture' && n[0] === 'commandes') || (v === 'client' && n[0] === 'clients') ? 'on' : ''}">${ic(n[2])}${n[1]}</a>`).join('')}<div style="margin-top:18px;padding:0 10px;font-size:13px;color:#cfe5de">${esc(u.nom)} · ${u.role === 'admin' ? 'Admin' : 'Employé'}<br><a href="#" data-act="logout" style="padding:6px 0;color:#fff">Changer d'utilisateur</a></div></nav><main>${c}</main><nav class="bnav">${[['accueil', 'Accueil', 'home'], ['nouvelle', 'Facture', 'plus'], ['commandes', 'Commandes', 'list'], ['clients', 'Clients', 'users'], ['plus', 'Plus', 'menu']].map(n => `<a href="#/${n[0]}" class="${v === n[0] || (n[0] === 'plus' && !main4.includes(v) && v !== 'facture' && v !== 'client') || (v === 'facture' && n[0] === 'commandes') || (v === 'client' && n[0] === 'clients') ? 'on' : ''}">${ic(n[2])}${n[1]}</a>`).join('')}</nav></div>`;
-}
-const topbar = (t, actions = '') => `<div class="top"><h1>${t}</h1><div class="row">${actions}<span id="syncb">${syncBadge()}</span></div></div>`;
-const kpi = (l, v, href) => `<a class="card kpi" ${href ? `href="${href}"` : ''}><div class="l">${l}</div><div class="v">${v}</div></a>`;
-function statutPill(f) { if (f.annulee) return '<span class="pill mut">Annulée</span>'; if (f.type === 'arriere') return '<span class="pill warn">Arriéré</span>'; return `<span class="pill ${{ recu: 'mut', en_cours: '', pret: 'ok', retire: 'mut' }[f.statut]}">${STATUTS[f.statut]}</span>`; }
-function rowFacture(f) { const r = reste(f); return `<a class="lrow" href="#/facture/${f.id}"><div style="min-width:0"><b>${esc(clientNom(f.clientId))}</b> <span class="mut">· ${esc(f.numero)}</span><div class="mut" style="font-size:13px">${f.type === 'arriere' ? 'Arriéré : ' + esc(f.arriere?.motif || 'ancien solde') : esc(resumeLignes(f))} · ${dFR(f.createdAt)}</div></div><div class="r" style="flex:none">${F(f.total)}<div>${statutPill(f)}${r > 0 ? ` <span class="pill warn">reste ${F(r)}</span>` : ''}</div></div></a>`; }
-const modesOpts = sel => Object.entries(MODES).map(([k, l]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${l}</option>`).join('');
-const catOpts = sel => db.settings.catalogue.map(c => `<option ${c.nom === sel ? 'selected' : ''}>${esc(c.nom)}</option>`).join('') + (sel && !db.settings.catalogue.some(c => c.nom === sel) ? `<option selected>${esc(sel)}</option>` : '');
-
-// ----- Connexion locale -----
-function vLogin() {
-  const us = db.settings.users, def = us.some(u => u.role === 'admin' && u.pin === '0000');
-  return `<div style="max-width:380px;margin:9vh auto;padding:16px"><div class="brand" style="color:var(--pri);font-size:28px;justify-content:center">${ic('drop')} MonPressing</div><div class="card"><form data-form="login"><label>Qui êtes-vous ?</label><select name="u">${us.map(u => `<option value="${u.id}">${esc(u.nom)} (${u.role === 'admin' ? 'Admin' : 'Employé'})</option>`).join('')}</select><label>Code PIN</label><input name="pin" type="password" inputmode="numeric" autocomplete="off" required><div style="margin-top:12px"><button class="btn p" style="width:100%;justify-content:center">Entrer</button></div>${def ? '<p class="mut" style="font-size:13px">Première utilisation : choisissez « Patron », PIN 0000, puis changez-le dans Paramètres.</p>' : ''}</form></div>${!all('factures').length ? `<div class="card"><h2>Nouveau téléphone ?</h2><p class="mut" style="margin-top:0">Reprenez les données d'un autre téléphone.</p><div class="row"><label class="btn" style="margin:0;color:var(--ink);font-size:15px">Restaurer une sauvegarde<input type="file" accept="application/json,.json" data-act-change="import" hidden></label><button class="btn" data-act="cloudRestore">Restaurer depuis internet</button></div></div>` : ''}</div>`;
-}
-
-// ----- Accueil -----
-function vAccueil() {
-  const u = currentUser(), adm = isAdmin(), fs = all('factures').filter(f => !f.annulee);
-  const prets = fs.filter(f => f.statut === 'pret' && f.type !== 'arriere'), an = adm ? anomalies() : [], deb = debiteurs().slice(0, 3), m = momentRelance();
-  const retards = fs.filter(f => ['recu', 'en_cours'].includes(f.statut) && f.dateRetrait && f.dateRetrait < today());
-  const aEnv = sumQ(lignesCousin().filter(x => x.l.cousinStatut === 'a_envoyer')), sug = adm ? suggestionsPromos() : [], it = [];
-  if (adm && db.settings.users.some(x => x.role === 'admin' && x.pin === '0000')) it.push(`<p>${ic('alert')} Changez le code PIN par défaut du patron dans <a href="#/parametres">Paramètres</a>.</p>`);
-  if (retards.length) it.push(`<p><b>${retards.length} commande(s) en retard</b> sur la date promise : ${retards.slice(0, 4).map(f => `<a href="#/facture/${f.id}">${esc(clientNom(f.clientId))}</a>`).join(', ')}. Prévenez les clients avant qu'ils se déplacent.</p>`);
-  if (aEnv) it.push(`<p>${aEnv} pièce(s) attendent d'être envoyées au cousin. <a href="#/cousin">Préparer l'envoi</a></p>`);
-  if (deb.length) it.push(`<p>${esc(m.txt)} À relancer en priorité : ${deb.map(d => `<a href="#/client/${d.c.id}">${esc(d.c.nom)}</a> (${F(d.r.solde)})`).join(', ')}. <a href="#/recouvrement">Relancer</a></p>`);
-  if (adm && !getCloud().enabled && (!safeGet('lastExport', '') || Date.now() - new Date(safeGet('lastExport', '')).getTime() > 7 * 864e5)) it.push(`<p>${ic('cloud')} Le téléphone est la seule copie de vos données : activez la <a href="#/parametres">sauvegarde en ligne</a> ou créez une sauvegarde chaque semaine.</p>`);
-  if (sug[0]) it.push(`<p>Idée de promotion : <b>${esc(sug[0].nom)}</b> (${promoLib(sug[0])}) — ${esc(sug[0].raison)} <a href="#/promos">Voir</a></p>`);
-  if (adm && !all('factures').length) it.push(`<p>Nouvelle installation ? <button class="btn sm" data-act="demo">Charger des données de démonstration</button></p>`);
-  const ca = cashAttendu(today());
-  return topbar('Bonjour ' + esc(u.nom), `<a class="btn p" href="#/nouvelle">${ic('plus')}Nouvelle facture</a>`) +
-    `<div class="grid">${kpi("Encaissé aujourd'hui", F(encaisse('jour').enc))}${kpi('Encaissé ce mois', F(encaisse('mois').enc))}${kpi('Impayés totaux', F(totalImpayes()), '#/recouvrement')}${kpi('Prêts à retirer', prets.length, '#/commandes')}${kpi('Pièces chez le cousin', piecesChezCousin(), '#/cousin')}</div>
-    ${an.length ? `<div class="card" style="border-left:4px solid var(--bad)"><h2>${ic('alert')} Alertes de caisse</h2>${an.map(a => `<p style="margin:6px 0">• ${esc(a.txt)}</p>`).join('')}</div>` : ''}
-    ${it.length ? `<div class="card ia"><h2>${ic('spark')} À faire aujourd'hui</h2>${it.join('')}</div>` : ''}
-    <div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Caisse du jour</h2><button class="btn sm" data-act="cloture">Clôturer la caisse</button></div>${adm ? `<p class="mut" style="margin-bottom:0">Enregistré aujourd'hui : espèces ${F(ca.esp)} · Mobile Money ${F(ca.momo)}</p>` : '<p class="mut" style="margin-bottom:0">En fin de journée, comptez la caisse et clôturez.</p>'}</div>
-    <div class="card"><h2>Prêts à retirer</h2>${prets.slice(0, 8).map(rowFacture).join('') || '<p class="mut">Rien pour le moment.</p>'}</div>`;
-}
-
-// ----- Nouvelle facture -----
-function newDraft(clientId = null) { return { id: uid(), clientId, clientNom: '', clientTel: '', lignes: [], express: false, promoId: null, promoAuto: true, remiseManuelle: 0, remiseMotif: '', arriere: { montant: 0, motif: '' }, envoiCousin: false, dateRetrait: null, dateManuelle: false, acompte: 0, modeAcompte: 'especes' }; }
-function clientCard(c) { const r = risqueClient(c.id); return `<div class="row" style="justify-content:space-between"><div><b>${esc(c.nom)}</b> <span class="mut">${esc(c.tel || '')}</span><div style="margin-top:4px">${r.solde ? `<span class="pill ${r.cls}">${r.label} · doit ${F(r.solde)}</span>` : '<span class="pill ok">À jour</span>'}</div></div><button class="btn sm" data-act="clearClient">Changer</button></div>`; }
-function ligneHTML(l, i, d) {
-  return `<div class="line-item"><div class="row" style="align-items:flex-start;flex-wrap:nowrap">${l.photoId ? `<img class="thumb" data-photo="${l.photoId}" data-act="zoomPhoto" alt="">` : ''}<div style="flex:1;min-width:0"><div class="row" style="flex-wrap:nowrap"><select data-l="${i}" data-k="article" style="flex:2">${catOpts(l.article)}</select><input data-l="${i}" data-k="qte" type="number" min="1" inputmode="numeric" value="${l.qte}" style="width:62px;flex:none" title="Quantité"><input data-l="${i}" data-k="prix" type="number" min="0" inputmode="numeric" value="${l.prix}" style="width:86px;flex:none" title="Prix unitaire"><button class="btn sm d" data-act="delLigne" data-i="${i}" title="Retirer">${ic('x')}</button></div><input data-l="${i}" data-k="notes" placeholder="Taches, dégâts, remarques…" value="${esc(l.notes || '')}" style="margin-top:6px">${l.ia ? `<div class="mut" style="font-size:12px;margin-top:4px">${ic('spark')} IA : ${esc(l.ia)}</div>` : ''}${d.envoiCousin ? `<label class="switch" style="margin-top:8px"><input type="checkbox" data-lchk="${i}" ${l.cousin ? 'checked' : ''}> Envoyer chez le cousin</label>` : ''}</div></div></div>`;
-}
-function totauxHTML(d) {
-  const c = calcFacture(d);
-  return `<table class="tot"><tr><td>Sous-total</td><td class="r">${F(c.sousTotal)}</td></tr>${c.maj ? `<tr><td>Express</td><td class="r">+${F(c.maj)}</td></tr>` : ''}${c.remisePromo ? `<tr><td>Promotion</td><td class="r">−${F(c.remisePromo)}</td></tr>` : ''}${c.remiseManuelle ? `<tr><td>Remise</td><td class="r">−${F(c.remiseManuelle)}</td></tr>` : ''}${c.arriere ? `<tr><td>Arriéré ajouté</td><td class="r">+${F(c.arriere)}</td></tr>` : ''}<tr><td><b>Total</b></td><td class="r big">${F(c.total)}</td></tr><tr><td class="mut">Reste après acompte</td><td class="r mut">${F(Math.max(0, c.total - (+d.acompte || 0)))}</td></tr></table>`;
-}
-function refreshTotaux() { const d = state.draft; if (!d) return; choosePromo(d); const el = $('#totaux'); if (el) el.innerHTML = totauxHTML(d); }
-function renderCRes() {
-  const el = $('#cres'); if (!el) return; const q = norm(state.cq); if (!q) { el.innerHTML = ''; return; }
-  const qd = q.replace(/\D/g, '');
-  const r = all('clients').filter(c => norm(c.nom).includes(q) || (qd && String(c.tel || '').replace(/\D/g, '').includes(qd))).slice(0, 6);
-  el.innerHTML = r.map(c => `<button class="btn sm" style="margin:6px 6px 0 0" data-act="pickClient" data-id="${c.id}">${esc(c.nom)}${c.tel ? ' · ' + esc(c.tel) : ''}</button>`).join('') || '<p class="mut" style="margin:6px 0 0">Aucun client trouvé : remplissez « nouveau client » ci-dessous.</p>';
-}
-function vNouvelle() {
-  const d = state.draft || (state.draft = newDraft()), S = db.settings, cl = d.clientId && get('clients', d.clientId);
-  choosePromo(d);
-  const promos = all('promotions').filter(p => promoActive(p, d.clientId) || p.id === d.promoId);
-  const sugC = d.lignes.map(l => ({ l, s: suggestionCousin(l.article) })).filter(x => x.s.oui && !x.l.cousin);
-  const dr = dateRetraitSuggeree(d); if (!d.dateManuelle) d.dateRetrait = dr.date;
-  const sold = cl ? soldeClient(cl.id) : 0, risk = cl ? risqueClient(cl.id) : null;
-  return topbar('Nouvelle facture', `<button class="btn sm" data-act="draftReset">Tout effacer</button>`) + `
-  <div class="card"><h2>1. Client</h2>${cl ? clientCard(cl) : `<input id="cq" placeholder="Rechercher un client (nom ou téléphone)…" value="${esc(state.cq)}" autocomplete="off"><div id="cres"></div><div class="f2" style="margin-top:6px"><div><label>Ou nouveau client : nom</label><input data-d="clientNom" value="${esc(d.clientNom)}" placeholder="Ex. Mme Houngbo"></div><div><label>Téléphone WhatsApp</label><input data-d="clientTel" inputmode="tel" value="${esc(d.clientTel)}" placeholder="01 97 00 00 00"></div></div>`}</div>
-  <div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">2. Articles</h2><div class="row"><button class="btn sm" data-act="dictee">${ic('mic')}Dicter</button><label class="btn sm" style="margin:0;color:var(--ink);font-size:13px">${ic('camera')}Photo<input type="file" accept="image/*" capture="environment" data-act-change="photoLigne" hidden></label><button class="btn sm p" data-act="addLigne">${ic('plus')}Article</button></div></div>
-   <div id="dicteeZone"></div>
-   <div style="margin-top:10px">${d.lignes.map((l, i) => ligneHTML(l, i, d)).join('') || '<p class="mut">Ajoutez les articles à la main, en photo (l\'IA reconnaît le vêtement et note les taches) ou en dictant.</p>'}</div>
-   <label class="switch" style="margin-top:6px"><input type="checkbox" data-dchk="express" ${d.express ? 'checked' : ''}> Express (+${S.expressMajoration} %)</label></div>
-  <div class="card"><h2>3. Envoi chez le cousin</h2><div class="seg" style="max-width:360px"><button data-act="cousinMode" data-v="0" class="${!d.envoiCousin ? 'on' : ''}">Non, tout reste ici</button><button data-act="cousinMode" data-v="1" class="${d.envoiCousin ? 'on' : ''}">Oui, je choisis</button></div>
-   ${d.envoiCousin ? '<p class="mut" style="margin:8px 0 0">Cochez « Envoyer chez le cousin » sur chaque article concerné.</p>' : ''}
-   ${sugC.length ? `<div class="card ia" style="margin:10px 0 0"><b>Suggestion :</b> envoyer ${sugC.map(x => esc(x.l.article) + ' (' + esc(x.s.raison) + ')').join(', ')}. <button class="btn sm" data-act="applySugCousin">Appliquer</button><div class="mut" style="font-size:12px;margin-top:4px">C'est vous qui décidez.</div></div>` : ''}</div>
-  <div class="card"><h2>4. Arriérés (antécédents du client)</h2>${sold ? `<p style="margin-top:0">Ce client doit déjà <b>${F(sold)}</b> sur ses anciennes factures dans l'application.</p>` : ''}<p class="mut" style="margin-top:0">Ajoutez ici une ancienne dette (cahier, avant l'application…). Elle s'ajoute au total de cette facture.</p><div class="f2"><div><label>Montant de l'arriéré</label><input type="number" min="0" inputmode="numeric" data-d="arriere.montant" value="${d.arriere.montant || ''}" placeholder="0"></div><div><label>Motif</label><input data-d="arriere.motif" placeholder="Ex. reste de décembre (cahier)" value="${esc(d.arriere.motif)}"></div></div></div>
-  <div class="card"><h2>5. Promotion, remise et retrait</h2>
-   <label>Promotion</label><select data-dsel="promoId"><option value="">Aucune</option>${promos.map(p => `<option value="${p.id}" ${p.id === d.promoId ? 'selected' : ''}>${esc(p.nom)} (${promoLib(p)}) → −${F(promoRemise(p, d.lignes))}</option>`).join('')}</select>${d.promoAuto && d.promoId ? '<div class="mut" style="font-size:12px">Meilleure promotion appliquée automatiquement.</div>' : ''}
-   <div class="f2"><div><label>Remise manuelle (F)</label><input type="number" min="0" inputmode="numeric" data-d="remiseManuelle" value="${d.remiseManuelle || ''}"></div><div><label>Motif de la remise</label><input data-d="remiseMotif" value="${esc(d.remiseMotif)}" placeholder="Obligatoire si remise"></div></div>
-   <label>Date de retrait</label><input type="date" data-d="dateRetrait" value="${d.dateRetrait}"><div class="mut" style="font-size:12px;margin-top:4px">Date conseillée : ${dFR(dr.date)}${dr.raisons.length ? ' (' + dr.raisons.join(', ') + ')' : ''}${d.dateManuelle ? ` · <a href="#" data-act="dateAuto">reprendre la date conseillée</a>` : ''}</div></div>
-  <div class="card"><h2>6. Paiement</h2><div id="totaux">${totauxHTML(d)}</div><div class="f2"><div><label>Acompte versé</label><input type="number" min="0" inputmode="numeric" data-d="acompte" value="${d.acompte || ''}"></div><div><label>Mode</label><select data-dsel="modeAcompte">${modesOpts(d.modeAcompte)}</select></div></div>
-   ${risk && risk.score >= 60 ? '<p class="pill bad" style="margin-top:10px;white-space:normal">Client à risque élevé : demandez le paiement avant de remettre les habits.</p>' : ''}
-   <button class="btn p" data-act="saveFacture" style="width:100%;justify-content:center;padding:13px;margin-top:14px">Enregistrer la facture</button></div>`;
-}
-
-// ----- Commandes -----
-function listeCommandes() {
-  const q = norm(state.q), k = state.filtre; let fs = all('factures').sort((a, b) => b.createdAt - a.createdAt);
-  if (k === 'actives') fs = fs.filter(f => !f.annulee && f.type !== 'arriere' && ['recu', 'en_cours', 'pret'].includes(f.statut));
-  if (k === 'pret') fs = fs.filter(f => !f.annulee && f.type !== 'arriere' && f.statut === 'pret');
-  if (k === 'impayees') fs = fs.filter(f => reste(f) > 0);
-  if (q) fs = fs.filter(f => norm(clientNom(f.clientId) + ' ' + f.numero + ' ' + (f.code || '')).includes(q));
-  return fs.slice(0, 200).map(rowFacture).join('') || '<p class="mut">Aucune commande.</p>';
-}
-function vCommandes() { return topbar('Commandes', `<a class="btn p sm" href="#/nouvelle">${ic('plus')}Nouvelle</a>`) + `<div class="card"><div class="seg" style="margin-bottom:10px">${[['actives', 'En cours'], ['pret', 'Prêtes'], ['impayees', 'Impayées'], ['toutes', 'Toutes']].map(([k, l]) => `<button data-act="filtre" data-v="${k}" class="${state.filtre === k ? 'on' : ''}">${l}</button>`).join('')}</div><input id="qsearch" placeholder="Rechercher : client, numéro, code de retrait…" value="${esc(state.q)}"><div id="liste">${listeCommandes()}</div></div>`; }
-
-// ----- Détail facture -----
-function vFacture(id) {
-  const f = get('factures', id); if (!f) return topbar('Facture introuvable');
-  const c = get('clients', f.clientId), r = reste(f), adm = isAdmin(), p = f.promoId && get('promotions', f.promoId);
-  const CS = { a_envoyer: 'À envoyer au cousin', chez_cousin: 'Chez le cousin', revenu: 'Revenu du cousin' };
-  return topbar('Facture ' + esc(f.numero)) + `
-  <div class="card"><div class="row" style="justify-content:space-between;align-items:flex-start"><div><a href="#/client/${f.clientId}" style="font-weight:700;font-size:17px">${esc(c?.nom || '?')}</a> <span class="mut">${esc(c?.tel || '')}</span><div class="mut" style="font-size:13px">Créée le ${new Date(f.createdAt).toLocaleString('fr-FR')} par ${esc(userName(f.createdBy))}${f.type !== 'arriere' && f.dateRetrait ? ` · Retrait prévu ${dFR(f.dateRetrait)}` : ''}</div></div><div class="r">${statutPill(f)}${f.code ? `<div class="mut" style="font-size:12px;margin-top:4px">Code de retrait : <b style="color:var(--ink)">${f.code}</b></div>` : ''}</div></div>
-   ${!f.annulee && f.type !== 'arriere' ? `<div class="seg" style="margin-top:12px">${['recu', 'en_cours', 'pret', 'retire'].map(s => `<button class="${f.statut === s ? 'on' : ''}" data-act="statut" data-id="${f.id}" data-s="${s}">${STATUTS[s]}</button>`).join('')}</div>` : ''}
-   ${f.annulee ? `<p class="pill bad" style="white-space:normal;margin-top:10px">Annulée par ${esc(userName(f.annuleBy))} : ${esc(f.annuleMotif || '')}</p>` : ''}</div>
-  ${f.lignes.length ? `<div class="card"><h2>Articles</h2>${f.lignes.map(l => `<div class="lrow"><div class="row" style="flex-wrap:nowrap;min-width:0;align-items:flex-start">${l.photoId ? `<img class="thumb" data-photo="${l.photoId}" data-act="zoomPhoto" alt="">` : ''}<div style="min-width:0"><b>${l.qte} × ${esc(l.article)}</b> <span class="mut">${F(l.prix)}</span>${l.notes ? `<div class="mut" style="font-size:13px">${esc(l.notes)}</div>` : ''}${l.cousin ? `<div><span class="pill">${CS[l.cousinStatut] || 'Cousin'}</span></div>` : (!f.annulee && ['recu', 'en_cours'].includes(f.statut) ? `<button class="btn sm" style="margin-top:4px" data-act="toCousin" data-f="${f.id}" data-l="${l.id}">${ic('truck')}Envoyer au cousin</button>` : '')}</div></div><div class="r" style="flex:none">${F(l.montant)}</div></div>`).join('')}</div>` : ''}
-  <div class="card"><h2>Montant</h2><table class="tot">${f.type !== 'arriere' ? `<tr><td>Sous-total</td><td class="r">${F(f.sousTotal)}</td></tr>` : ''}${f.majoration ? `<tr><td>Express</td><td class="r">+${F(f.majoration)}</td></tr>` : ''}${f.remisePromo ? `<tr><td>Promotion${p ? ' « ' + esc(p.nom) + ' »' : ''}</td><td class="r">−${F(f.remisePromo)}</td></tr>` : ''}${f.remiseManuelle ? `<tr><td>Remise (${esc(f.remiseMotif || '')})</td><td class="r">−${F(f.remiseManuelle)}</td></tr>` : ''}${f.arriere ? `<tr><td>Arriéré : ${esc(f.arriere.motif || 'ancien solde')}</td><td class="r">+${F(f.arriere.montant)}</td></tr>` : ''}<tr><td><b>Total</b></td><td class="r"><b>${F(f.total)}</b></td></tr><tr><td>Payé</td><td class="r">${F(paye(f))}</td></tr><tr><td><b>Reste à payer</b></td><td class="r big" style="color:${r ? 'var(--bad)' : 'var(--ok)'}">${F(r)}</td></tr></table>
-   ${(f.paiements || []).length ? `<h2 style="margin-top:14px">Paiements</h2>${f.paiements.map(x => `<div class="lrow"><span class="mut" style="font-size:14px">${new Date(x.date).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })} · ${MODES[x.mode] || x.mode} · ${esc(userName(x.user))}</span><span class="row" style="flex:none">${F(x.montant)}${adm ? `<button class="btn sm d" data-act="delPaiement" data-f="${f.id}" data-p="${x.id}" title="Supprimer">${ic('x')}</button>` : ''}</span></div>`).join('')}` : ''}
-   ${r > 0 ? `<form data-form="paiement" class="row" style="margin-top:12px;align-items:flex-end"><input type="hidden" name="id" value="${f.id}"><div style="flex:1;min-width:120px"><label>Montant reçu</label><input name="montant" type="number" min="1" inputmode="numeric" value="${r}" required></div><div style="flex:1;min-width:140px"><label>Mode</label><select name="mode">${modesOpts('especes')}</select></div><button class="btn p">Encaisser</button></form>` : ''}</div>
-  <div class="card row"><button class="btn" data-act="recuWa" data-id="${f.id}">${ic('msg')}Reçu WhatsApp</button><button class="btn" data-act="imprimer" data-id="${f.id}">${ic('print')}Imprimer</button>${r > 0 ? `<button class="btn a" data-act="lienPaiement" data-id="${f.id}">Demander le paiement</button>` : ''}${!f.annulee ? `<button class="btn d" data-act="annuler" data-id="${f.id}">Annuler la facture</button>` : ''}</div>`;
-}
-
-// ----- Clients -----
-function listeClients() {
-  const q = norm(state.clq), qd = q.replace(/\D/g, '');
-  return all('clients').filter(c => !q || norm(c.nom).includes(q) || (qd && String(c.tel || '').replace(/\D/g, '').includes(qd))).sort((a, b) => a.nom.localeCompare(b.nom, 'fr')).slice(0, 300).map(c => { const r = risqueClient(c.id); return `<a class="lrow" href="#/client/${c.id}"><div><b>${esc(c.nom)}</b><div class="mut" style="font-size:13px">${esc(c.tel || '')}${c.quartier ? ' · ' + esc(c.quartier) : ''}</div></div><div class="r">${r.solde ? `<span class="pill ${r.cls}">doit ${F(r.solde)}</span>` : '<span class="pill ok">À jour</span>'}</div></a>`; }).join('') || '<p class="mut">Aucun client.</p>';
-}
-function vClients() { return topbar('Clients', `<button class="btn p sm" data-act="newClient">${ic('plus')}Nouveau client</button>`) + `<div class="card"><input id="clq" placeholder="Rechercher un client…" value="${esc(state.clq)}"><div id="cliste">${listeClients()}</div></div>`; }
-function clientForm(c = {}) { return `<h2>${c.id ? 'Modifier le client' : 'Nouveau client'}</h2><form data-form="client"><input type="hidden" name="id" value="${c.id || ''}"><label>Nom</label><input name="nom" required value="${esc(c.nom || '')}"><label>Téléphone WhatsApp</label><input name="tel" inputmode="tel" value="${esc(c.tel || '')}"><label>Quartier</label><input name="quartier" value="${esc(c.quartier || '')}"><label>Notes</label><textarea name="notes" rows="2">${esc(c.notes || '')}</textarea><div class="row" style="margin-top:12px"><button class="btn p">Enregistrer</button><button type="button" class="btn" data-act="closeModal">Annuler</button></div></form>`; }
-function vClient(id) {
-  const c = get('clients', id); if (!c) return topbar('Client introuvable');
-  const fs = factClient(id).sort((a, b) => b.createdAt - a.createdAt), r = risqueClient(id), tot = fs.filter(f => !f.annulee && f.type !== 'arriere').reduce((s, f) => s + f.total, 0);
-  return topbar(esc(c.nom), `<button class="btn sm" data-act="editClient" data-id="${id}">Modifier</button>`) + `
-  <div class="grid">${kpi('Doit actuellement', F(r.solde))}${kpi('Profil', `<span class="pill ${r.cls}" style="font-size:14px">${r.label}</span>`)}${kpi('Total des dépôts', F(tot))}${kpi('Dernier passage', dernierPassage(id) ? dFR(dernierPassage(id)) : '—')}</div>
-  <div class="card"><p style="margin-top:0">${c.tel ? `<a href="tel:${esc(c.tel)}">${esc(c.tel)}</a> · <a href="${wa(c.tel, 'Bonjour ' + c.nom + ', ')}" target="_blank" rel="noopener">WhatsApp</a>` : '<span class="mut">Pas de téléphone</span>'}${c.quartier ? ' · ' + esc(c.quartier) : ''}</p>${c.notes ? `<p class="mut">${esc(c.notes)}</p>` : ''}${r.score >= 60 ? '<p class="pill bad" style="white-space:normal">Conseil : ne plus accorder de crédit à ce client tant que le solde n\'est pas réglé.</p>' : ''}
-   <div class="row"><button class="btn p" data-act="newFactClient" data-id="${id}">${ic('plus')}Nouvelle facture</button><button class="btn" data-act="arriereClient" data-id="${id}">Ajouter un arriéré</button>${r.solde ? `<button class="btn a" data-act="relance" data-id="${id}">${ic('msg')}Relancer</button>` : ''}</div></div>
-  <div class="card"><h2>Historique</h2>${fs.map(rowFacture).join('') || '<p class="mut">Aucune facture.</p>'}</div>`;
-}
-
-// ----- Recouvrement -----
-function vRecouvrement() {
-  const m = momentRelance(), deb = debiteurs();
-  return topbar('Recouvrement des impayés') + `<div class="card ${m.bon ? 'ia' : ''}">${esc(m.txt)}</div>
-  <div class="grid">${kpi('Total à recouvrer', F(deb.reduce((s, d) => s + d.r.solde, 0)))}${kpi('Clients concernés', deb.length)}${kpi('Risque élevé', deb.filter(d => d.r.score >= 60).length)}</div>
-  <div class="card">${deb.map(d => `<div class="lrow"><a href="#/client/${d.c.id}" style="color:inherit;text-decoration:none;min-width:0"><b>${esc(d.c.nom)}</b><div class="mut" style="font-size:13px">${d.r.nb} facture(s) · la plus ancienne date de ${d.r.jours} j${d.c.derniereRelance ? ` · relancé il y a ${jours(d.c.derniereRelance)} j` : ''}</div><span class="pill ${d.r.cls}">${d.r.label}</span>${d.r.score >= 60 ? ' <span class="mut" style="font-size:12px">plus de crédit conseillé</span>' : ''}</a><div class="r" style="flex:none"><div style="font-weight:800">${F(d.r.solde)}</div><button class="btn sm p" style="margin-top:4px" data-act="relance" data-id="${d.c.id}">${ic('msg')}Relancer</button></div></div>`).join('') || '<p class="mut">Aucun impayé. Bravo !</p>'}</div>`;
-}
-
-// ----- Cousin -----
-function rowLigneC(x) {
-  const s = x.l.cousinStatut;
-  return `<div class="lrow"><div style="min-width:0"><b>${x.l.qte} × ${esc(x.l.article)}</b> <span class="mut">· <a href="#/facture/${x.f.id}">${esc(x.f.numero)}</a> · ${esc(clientNom(x.f.clientId))}${s === 'chez_cousin' ? ' · depuis ' + jours(x.l.sentAt) + ' j' : ''}</span>${x.l.notes ? `<div class="mut" style="font-size:12px">${esc(x.l.notes)}</div>` : ''}</div>${s === 'chez_cousin' ? `<button class="btn sm p" data-act="cousinRevenu" data-f="${x.f.id}" data-l="${x.l.id}">Revenu</button>` : `<button class="btn sm" data-act="cousinGarder" data-f="${x.f.id}" data-l="${x.l.id}">Garder ici</button>`}</div>`;
-}
-function vCousin() {
-  const L = lignesCousin(), aEnv = L.filter(x => x.l.cousinStatut === 'a_envoyer'), chez = L.filter(x => x.l.cousinStatut === 'chez_cousin').sort((a, b) => a.l.sentAt - b.l.sentAt), st = statsCousin();
-  return topbar('Chez ' + esc(db.settings.cousin.nom || 'le cousin')) + `<div class="grid">${kpi('À envoyer', sumQ(aEnv))}${kpi('Chez le cousin', sumQ(chez))}${kpi('Délai moyen', st.delai !== null ? st.delai + ' j' : '—')}${kpi('Coût cousin ce mois', F(st.coutMois))}</div>
-  <div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">À envoyer</h2>${aEnv.length ? `<button class="btn sm p" data-act="envoyerCousin">${ic('truck')}Tout envoyer + bordereau WhatsApp</button>` : ''}</div>${aEnv.map(rowLigneC).join('') || '<p class="mut">Rien à envoyer.</p>'}</div>
-  <div class="card"><h2>Chez le cousin</h2>${chez.map(rowLigneC).join('') || '<p class="mut">Aucune pièce chez le cousin.</p>'}</div>`;
-}
-
-// ----- Promotions -----
-function promoForm(p = {}) {
-  const S = db.settings;
-  return `<h2>${p.id ? 'Modifier la' : 'Nouvelle'} promotion</h2><form data-form="promo"><input type="hidden" name="id" value="${p.id || ''}"><label>Nom</label><input name="nom" required value="${esc(p.nom || '')}"><div class="f2"><div><label>Type</label><select name="type"><option value="pourcent" ${p.type !== 'montant' ? 'selected' : ''}>Pourcentage (%)</option><option value="montant" ${p.type === 'montant' ? 'selected' : ''}>Montant fixe (F)</option></select></div><div><label>Valeur</label><input name="valeur" type="number" min="1" required value="${p.valeur || ''}"></div></div><div class="f2"><div><label>Début (facultatif)</label><input name="debut" type="date" value="${p.debut || ''}"></div><div><label>Fin (facultatif)</label><input name="fin" type="date" value="${p.fin || ''}"></div></div><label>Jours (aucun coché = tous les jours)</label><div class="row">${JOURS.map((j, i) => `<label class="switch" style="font-weight:500"><input type="checkbox" name="j${i}" ${(p.jours || []).includes(i) ? 'checked' : ''}>${j.slice(0, 3)}</label>`).join('')}</div><label>Articles concernés (aucun coché = tous)</label><div class="row">${S.catalogue.map((c, i) => `<label class="switch" style="font-weight:500"><input type="checkbox" name="a${i}" ${(p.articles || []).includes(c.nom) ? 'checked' : ''}>${esc(c.nom)}</label>`).join('')}</div><div class="f2"><div><label>Pour qui</label><select name="cible">${[['tous', 'Tous les clients'], ['nouveaux', 'Nouveaux clients'], ['inactifs', 'Clients inactifs (2 mois et plus)']].map(([v, l]) => `<option value="${v}" ${p.cible === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div><label>Minimum de commande (F)</label><input name="minimum" type="number" min="0" value="${p.minimum || ''}"></div></div><label class="switch" style="margin-top:12px"><input type="checkbox" name="actif" ${p.actif !== false ? 'checked' : ''}> Promotion active</label><div class="row" style="margin-top:12px"><button class="btn p">Enregistrer</button><button type="button" class="btn" data-act="closeModal">Annuler</button></div></form>`;
-}
-function vPromos() {
-  const ps = all('promotions').sort((a, b) => b.createdAt - a.createdAt); state.sugs = [...suggestionsPromos(), ...state.sugsIA];
-  return topbar('Promotions', `<button class="btn p sm" data-act="newPromo">${ic('plus')}Nouvelle promotion</button>`) + `<div class="card">${ps.map(p => { const u = usagePromo(p.id); return `<div class="lrow"><div style="min-width:0"><b>${esc(p.nom)}</b> <span class="mut">${promoLib(p)}</span><div class="mut" style="font-size:13px">${esc(promoConditions(p))}</div><div class="mut" style="font-size:12px">Utilisée ${u.n} fois · ${F(u.remise)} offerts</div></div><div class="row" style="flex:none">${promoEnCours(p) ? '<span class="pill ok">Active</span>' : '<span class="pill mut">Inactive</span>'}<button class="btn sm" data-act="editPromo" data-id="${p.id}">Modifier</button><button class="btn sm d" data-act="delPromo" data-id="${p.id}" title="Supprimer">${ic('x')}</button></div></div>`; }).join('') || '<p class="mut">Aucune promotion. Créez-en une ou partez d\'une idée ci-dessous.</p>'}</div>
-  <div class="card ia"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${ic('spark')} Idées de promotions</h2>${aiReady() ? `<button class="btn sm a" data-act="promosIA">Plus d'idées avec l'IA</button>` : ''}</div>${state.sugs.map((s, i) => `<div class="lrow"><div style="min-width:0"><b>${esc(s.nom)}</b> <span class="mut">${promoLib(s)}</span><div class="mut" style="font-size:13px">${esc(s.raison || '')}</div></div><button class="btn sm" data-act="useSug" data-i="${i}">Créer</button></div>`).join('') || '<p class="mut">Pas d\'idée pour le moment : il faut un peu plus d\'historique.</p>'}</div>`;
-}
-
-// ----- Assistant -----
-function chatHTML() {
-  if (!state.chat.length) return '<div class="msg bot">Bonjour patron ! Posez-moi une question sur votre pressing : argent encaissé, impayés, cousin, commandes, meilleurs clients… Je peux aussi faire le résumé de la semaine.</div>';
-  return state.chat.map((m, i) => m.me ? `<div class="msg me">${esc(m.t)}</div>` : `<div class="msg bot">${esc(m.t)}${m.wait ? '' : `<div class="row" style="margin-top:8px"><button class="btn sm" data-act="speak" data-i="${i}">${ic('vol')}Écouter</button><a class="btn sm" href="#" target="_blank" rel="noopener" data-act="waChat" data-i="${i}">${ic('msg')}WhatsApp</a></div>`}</div>`).join('');
-}
-function renderChat() { const c = $('#chat'); if (c) { c.innerHTML = chatHTML(); c.scrollTop = c.scrollHeight; } }
-function vAssistant() { return topbar('Assistant du patron') + `<div class="card"><div class="row">${["Combien j'ai encaissé ce mois ?", 'Qui me doit le plus ?', 'Combien de pièces chez le cousin ?', 'Quelles commandes sont prêtes ?', 'Résumé de la semaine'].map(q => `<button class="btn sm" data-act="askQ" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div></div><div class="card"><div id="chat" class="chat">${chatHTML()}</div><form data-form="ask" class="row" style="margin-top:12px;flex-wrap:nowrap"><input name="q" id="askq" placeholder="Posez votre question…" autocomplete="off"><button type="button" class="btn" data-act="askMic" title="Dicter">${ic('mic')}</button><button class="btn p">Envoyer</button></form>${aiReady() ? '' : '<p class="mut" style="font-size:13px">Hors ligne : je réponds aux questions courantes. Les questions libres passent par l\'IA (clé API Claude dans Paramètres).</p>'}</div>`; }
-
-// ----- Détachage -----
-const GUIDE = [
-  ['Huile, graisse, huile rouge, beurre de karité', 'Saupoudrez tout de suite du talc ou de l\'amidon, laissez absorber 30 min et brossez. Mettez ensuite un peu de liquide vaisselle sur la tache, frottez doucement et lavez à l\'eau tiède.'],
-  ['Terre rouge (latérite), boue', 'Laissez bien sécher, puis brossez à sec pour enlever le maximum. Prétraitez au savon et lavez à l\'eau froide. Ne frottez pas la boue mouillée : elle rentre dans les fibres.'],
-  ['Sang', 'Eau FROIDE uniquement (l\'eau chaude fixe la tache). Tamponnez, puis savon et rinçage froid.'],
-  ['Sueur, col et aisselles jaunis', 'Pâte de bicarbonate et d\'eau, ou vinaigre blanc dilué, 30 min avant le lavage. Brossez doucement le col.'],
-  ['Encre de stylo', 'Tamponnez avec de l\'alcool à 70° sur un chiffon blanc, de l\'extérieur vers le centre. Changez souvent de chiffon.'],
-  ['Rouille', 'Jus de citron et sel, au soleil quelques minutes, puis rinçage. À éviter sur les couleurs fragiles.'],
-  ['Mangue, fruits, jus, sauce tomate', 'Rincez vite à l\'eau froide par l\'envers, puis savon. Plus on attend, plus la tache se fixe.'],
-  ['Cire de bougie', 'Grattez la cire durcie, posez du papier absorbant dessus et passez un fer tiède.'],
-  ['Précautions par tissu', 'Wax et pagne : testez la couleur sur un coin caché, eau froide, jamais de javel. Bazin : pas de javel sur les couleurs, lavage doux, amidonnez après. Soie et tissus délicats : ne frottez pas, nettoyage à sec. Dans tous les cas, testez d\'abord sur une partie cachée.']
-];
-function vDetachage() {
-  return topbar('Conseils de détachage') + `<div class="card"><form data-form="detachage"><label>Photo de la tache</label><input type="file" accept="image/*" capture="environment" data-act-change="detPhoto"><img id="detPrev" alt="" style="max-width:220px;border-radius:10px;margin-top:8px" ${state.detPhoto ? `src="${state.detPhoto}"` : 'hidden'}><div class="f2"><div><label>Tissu</label><select name="tissu">${['Inconnu', 'Coton', 'Wax / pagne', 'Bazin', 'Soie', 'Laine', 'Synthétique', 'Jean', 'Lin'].map(t => `<option>${t}</option>`).join('')}</select></div><div><label>Couleur</label><input name="couleur" placeholder="Ex. blanc, bleu indigo…"></div></div><label>Tache supposée (facultatif)</label><input name="tache" placeholder="Ex. huile rouge, encre…"><button class="btn p" style="margin-top:12px">${ic('spark')}Analyser avec l'IA</button></form></div><div id="detRes"></div>
-  <div class="card"><h2>Guide rapide (fonctionne hors ligne)</h2>${GUIDE.map(([t, x]) => `<details><summary>${esc(t)}</summary><p style="margin:8px 0 0">${esc(x)}</p></details>`).join('')}</div>`;
-}
-
-// ----- Plus -----
-function vPlus() { return topbar('Plus') + `<div class="grid">${NAV.filter(n => !n[3] || isAdmin()).map(n => `<a class="card" href="#/${n[0]}" style="text-decoration:none;color:inherit;margin:0;display:flex;gap:10px;align-items:center">${ic(n[2])}<b>${n[1]}</b></a>`).join('')}</div><div class="card">${esc(currentUser().nom)} · ${isAdmin() ? 'Admin' : 'Employé'} <button class="btn sm" data-act="logout">Changer d'utilisateur</button></div>`; }
-
-// ----- Paramètres -----
-function vParametres() {
-  const S = db.settings, c = cfg(), adm = isAdmin();
-  const cl = getCloud(), l = safeGet('cloudLast', null);
-  let h = topbar('Paramètres') + `<div class="card"><h2>${ic('cloud')} Sauvegarde automatique en ligne</h2><p class="mut" style="margin-top:0">Chaque soir à partir de 19 h, dès que l'appli est ouverte avec internet, une copie <b>chiffrée</b> de toutes les données (photos comprises) part dans Supabase, bucket « saves ».${l ? `<br>Dernier envoi : ${l.ok ? 'réussi le ' + new Date(l.at).toLocaleString('fr-FR') : 'échec (' + esc(l.error || '') + ')'}` : ''}</p>
-   ${adm ? `<details><summary>Guide pas à pas (une seule fois)</summary><ol style="padding-left:18px"><li>Créez un compte gratuit sur supabase.com, puis un projet.</li><li>Ouvrez <b>SQL Editor</b>, collez le code ci-dessous et cliquez sur <b>Run</b> : il crée le dossier « saves » et ses règles d'accès.</li><li>Dans <b>Project Settings › API</b>, copiez l'adresse du projet et la clé publique (anon ou publishable).</li><li>Choisissez un mot de passe de sauvegarde et <b>notez-le</b> : sans lui, impossible de restaurer.</li></ol><textarea id="mtxt" rows="6" readonly>${esc(cloud.SETUP_SQL)}</textarea><button type="button" class="btn sm" data-act="copyTxt" style="margin:6px 0 10px">Copier le code</button></details>
-   <form data-form="cloud"><label>Adresse du projet</label><input name="url" placeholder="https://xxxx.supabase.co" value="${esc(cl.url)}"><label>Clé publique</label><input name="key" value="${esc(cl.key)}" autocomplete="off"><label>Mot de passe de sauvegarde</label><input name="password" type="password" value="${esc(cl.password)}" autocomplete="new-password"><label class="switch" style="margin-top:10px"><input type="checkbox" name="enabled" ${cl.enabled ? 'checked' : ''}> Sauvegarde automatique activée</label><div class="row" style="margin-top:10px"><button class="btn p">Enregistrer</button><button type="button" class="btn" data-act="cloudNow">Sauvegarder maintenant</button><button type="button" class="btn" data-act="cloudRestore">Restaurer depuis internet</button></div></form>` : '<p class="mut">Réglage réservé à l\'administrateur.</p>'}</div>`;
-  if (adm) h += `<div class="card"><h2>${ic('spark')} Intelligence artificielle</h2><p class="mut" style="margin-top:0">Photo des vêtements, dictée, relances, idées de promotions, assistant et détachage. Il faut une clé API Claude (console.anthropic.com) ; chaque utilisation est payée sur ce compte (quelques francs). La clé reste dans ce téléphone.</p><form data-form="iacfg"><label>Clé API Claude</label><input name="iaKey" type="password" value="${esc(cfg().iaKey)}" placeholder="sk-ant-…" autocomplete="off"><label class="switch" style="margin-top:10px"><input type="checkbox" name="ia" ${cfg().ia !== false ? 'checked' : ''}> IA activée</label><div class="row" style="margin-top:10px"><button class="btn p">Enregistrer</button><button type="button" class="btn" data-act="iaTest">Tester</button></div></form></div>`;
-  if (!adm) return h + '<div class="card mut">Les autres réglages sont réservés à l\'administrateur.</div>';
-  h += `<div class="card"><h2>Le pressing</h2><form data-form="reglages"><div class="f2"><div><label>Nom du pressing</label><input name="nom" value="${esc(S.nom)}"></div><div><label>WhatsApp du patron</label><input name="tel" inputmode="tel" value="${esc(S.tel)}"></div></div><label>Adresse</label><input name="adresse" value="${esc(S.adresse)}">
-   <div class="f2"><div><label>Numéro MTN MoMo</label><input name="mtn" inputmode="tel" value="${esc(S.momo.mtn)}"></div><div><label>Numéro Moov Money</label><input name="moov" inputmode="tel" value="${esc(S.momo.moov)}"></div></div><div class="f2"><div><label>Numéro Celtiis Cash</label><input name="celtiis" inputmode="tel" value="${esc(S.momo.celtiis)}"></div><div></div></div>
-   <div class="f2"><div><label>Nom du cousin (sous-traitant)</label><input name="cnom" value="${esc(S.cousin.nom)}"></div><div><label>WhatsApp du cousin</label><input name="ctel" inputmode="tel" value="${esc(S.cousin.tel)}"></div></div>
-   <div class="f2"><div><label>Capacité de l'atelier (pièces/jour)</label><input name="capaciteJour" type="number" min="1" value="${S.capaciteJour}"></div><div><label>Majoration express (%)</label><input name="express" type="number" min="0" value="${S.expressMajoration}"></div></div>
-   <label>Mois de saison des pluies (séchage plus long)</label><div class="row">${MOIS.map((m, i) => `<label class="switch" style="font-weight:500"><input type="checkbox" name="m${i + 1}" ${S.moisPluies.includes(i + 1) ? 'checked' : ''}>${m}</label>`).join('')}</div>
-   <button class="btn p" style="margin-top:12px">Enregistrer</button></form></div>
-  <div class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Tarifs et articles</h2><button class="btn sm" data-act="addCat">${ic('plus')}Article</button></div><div style="overflow:auto"><table class="t"><tr><th>Article</th><th>Prix (F)</th><th>Délai (j)</th><th>Cousin par défaut</th><th>Coût cousin (F)</th><th></th></tr>${S.catalogue.map((x, i) => `<tr><td><input data-cat="${i}" data-ck="nom" value="${esc(x.nom)}" style="min-width:140px"></td><td><input data-cat="${i}" data-ck="prix" type="number" min="0" value="${x.prix}" style="width:90px"></td><td><input data-cat="${i}" data-ck="delai" type="number" min="1" value="${x.delai}" style="width:64px"></td><td><input data-cat="${i}" data-ck="cousin" type="checkbox" ${x.cousin ? 'checked' : ''} style="width:auto"></td><td><input data-cat="${i}" data-ck="coutCousin" type="number" min="0" value="${x.coutCousin || 0}" style="width:90px"></td><td><button class="btn sm d" data-act="delCat" data-i="${i}">${ic('x')}</button></td></tr>`).join('')}</table></div><p class="mut" style="font-size:13px">Les prix sont des exemples : mettez vos vrais tarifs. Les changements sont enregistrés tout de suite.</p></div>
-  <div class="card"><h2>Utilisateurs</h2>${S.users.map(u => `<div class="lrow"><span><b>${esc(u.nom)}</b> <span class="pill ${u.role === 'admin' ? '' : 'mut'}">${u.role === 'admin' ? 'Admin' : 'Employé'}</span></span><span class="row"><button class="btn sm" data-act="pinUser" data-id="${u.id}">Changer le PIN</button>${u.id !== currentUser().id ? `<button class="btn sm d" data-act="delUser" data-id="${u.id}">${ic('x')}</button>` : ''}</span></div>`).join('')}
-   <form data-form="user" class="row" style="margin-top:10px;align-items:flex-end"><div style="flex:2;min-width:140px"><label>Nom</label><input name="nom" required></div><div style="flex:1;min-width:110px"><label>Rôle</label><select name="role"><option value="employe">Employé</option><option value="admin">Admin</option></select></div><div style="flex:1;min-width:100px"><label>PIN</label><input name="pin" inputmode="numeric" required placeholder="4 à 6 chiffres"></div><button class="btn p">Ajouter</button></form></div>
-  <div class="card"><h2>Sauvegarde de secours</h2><div class="row"><button class="btn" data-act="export">Télécharger une copie (JSON)</button><label class="btn" style="margin:0;color:var(--ink);font-size:15px">Importer une copie<input type="file" accept="application/json,.json" data-act-change="import" hidden></label>${db.clients.some(c => c.demo && !c.deleted) ? '<button class="btn d" data-act="demoOff">Supprimer les données de démo</button>' : '<button class="btn" data-act="demo">Charger des données de démo</button>'}</div></div>`;
-  return h;
-}
-
-// ---------- Rendu ----------
-const VIEWS = {
-  accueil: { r: vAccueil }, nouvelle: { r: vNouvelle, after: () => { renderCRes(); loadPhotos(); } }, commandes: { r: vCommandes },
-  facture: { r: () => vFacture(state.param), after: loadPhotos }, clients: { r: vClients }, client: { r: () => vClient(state.param) },
-  recouvrement: { r: vRecouvrement }, cousin: { r: vCousin }, promos: { r: vPromos, admin: true }, assistant: { r: vAssistant, admin: true, after: renderChat },
-  detachage: { r: vDetachage }, parametres: { r: vParametres }, plus: { r: vPlus }
+  archiveReports(reports);
+  bindReminders(hv, plan, () => routes.home());
 };
-function render() {
-  const app = $('#app');
-  if (!currentUser()) { app.innerHTML = vLogin(); return; }
-  const V = VIEWS[state.view] || VIEWS.accueil;
-  if (V.admin && !isAdmin()) { app.innerHTML = shell(topbar('Accès réservé') + '<div class="card">Cette page est réservée à l\'administrateur.</div>'); return; }
-  app.innerHTML = shell(V.r()); V.after && V.after();
+
+routes.new = async (_, q) => {
+  setNav('plus');
+  const number = await L.nextNumber();
+  setTop({ title: 'Nouvelle facture', right: `<span class="pill">N°${number}</span>` });
+  const arts = await L.getArticles(true);
+  const orders = await db.all('orders');
+  const reg = await L.getClientsReg();
+  const stats = L.clientsWithStats(reg, orders);
+  const promos = (await L.getPromos()).filter((p) => L.promoActiveNow(p));
+  const qty = {};
+  let prices = {};                   // prix modifiés pour cette facture (id article → prix)
+  const remember = {};               // prix à retenir pour le client
+  const priceOf = (a) => (prices[a.id] != null ? prices[a.id] : a.price);
+  let client = null;                 // fiche choisie
+  let known = { fiche: 0, invoices: [] };
+  let loyaltyOn = true;
+  const promoOn = Object.fromEntries(promos.map((p) => [p.id, !!p.auto]));
+  const v = view(`<div class="card">
+      <label class="f">Client</label>
+      <div class="combo"><input class="i" id="n-client" placeholder="Choisir ou écrire un nom…" autocomplete="off" autocapitalize="words"><button class="combo-btn" id="n-open" type="button" aria-label="Liste">▾</button></div>
+      <div id="n-list" class="sugg hidden"></div>
+      <div id="n-chosen"></div>
+      <div id="n-newc" class="hidden stack newc">
+        <b class="small" style="color:var(--blue)">Nouveau client : il sera ajouté à vos clients</b>
+        <div class="grid2"><div><label class="f">Nom</label><input class="i" id="nc-last" autocapitalize="characters"></div>
+          <div><label class="f">Prénom</label><input class="i" id="nc-first" autocapitalize="words"></div></div>
+        <div class="seg sex" id="nc-sex"><a data-sex="M">Monsieur</a><a data-sex="F">Madame</a></div>
+        <div><label class="f">Numéro WhatsApp</label><input class="i" id="nc-phone" type="tel" inputmode="tel"></div>
+      </div></div>
+    <div class="card"><label class="f">Lavage</label>
+      <div class="seg" id="n-wash"><a class="on" data-w="cousin">🧺 Chez le cousin</a><a data-w="maison">🏠 Lavage maison</a></div>
+      <p class="small muted" id="n-washinfo" style="margin:6px 0 0"></p></div>
+    <div class="card"><div class="btns"><button class="btn" id="n-dict" type="button">🎤 Dicter la commande</button><label class="btn">📷 Photo${iaPrete() ? ' + IA' : ''}<input type="file" accept="image/*" capture="environment" id="n-photo" hidden></label></div>
+      <p class="small muted" style="margin:6px 0 0">${iaPrete() ? 'Photo : l’IA reconnaît le vêtement et note les taches et dégâts.' : 'Dites par ex. « trois chemises, deux pantalons, un boubou » ; la photo est rangée sur la pièce.'}</p>
+      <div id="n-pend" class="pends"></div></div>
+    <div class="card" id="n-arts">${arts.map((a) => `<div class="art" data-id="${a.id}">
+        <div class="name">${esc(a.name)}<div class="price"><button type="button" class="pedit" data-pedit="${a.id}"><span class="pv">${money(a.price)}</span> ✎</button>${a.homeWash ? ' · lavage maison' : ''}</div></div>
+        <div class="qty"><button class="minus" data-d="-1">−</button><output>0</output><button class="plus" data-d="1">+</button></div></div>`).join('') || '<div class="empty">Aucun article actif : ajoutez-en dans Réglages.</div>'}</div>
+    <div class="card stack">
+      <div><label class="f">À rendre le</label><input class="i" id="n-due" type="datetime-local" value="${L.defaultDue(S.dueDays)}"><p class="small muted" id="n-duehint" style="margin:4px 0 0"></p></div>
+      <div id="n-kgbox"><label class="f">Poids pesé (kg) — facultatif</label><input class="i" id="n-kg" type="number" inputmode="decimal" step="0.1" min="0" placeholder="estimé : 0 kg"></div>
+      <label class="check"><input type="checkbox" id="n-deliv"> Livraison (+${money(S.deliveryFee)})</label>
+      <div id="n-dbox" class="hidden stack">
+        <div><label class="f">Lieu de livraison</label><input class="i" id="n-place"></div>
+        <div><label class="f">Date et heure de livraison</label><input class="i" id="n-at" type="datetime-local"></div>
+      </div>
+      <div id="n-promos"></div>
+      <div id="n-arrbox">
+        <button class="btn sm ghost" id="n-arr-add" type="button">+ Ajouter un arriéré (ancien solde)</button>
+        <div id="n-arr" class="hidden stack arr"></div>
+      </div>
+      <div class="grid2">
+        <div><label class="f">Remise libre (F)</label><input class="i" id="n-disc" type="number" inputmode="numeric" min="0" placeholder="0"></div>
+        <div><label class="f">Payé maintenant (F)</label><input class="i" id="n-dep" type="number" inputmode="numeric" min="0" placeholder="0 = rien"></div>
+      </div>
+      <div class="row" style="gap:6px"><button class="btn sm ghost" id="n-full" type="button">Tout payé</button><span class="small muted" id="n-rest"></span></div>
+    </div>
+    <div class="totalbar">
+      <div class="row between"><span>À payer</span><span class="big" id="n-total">0 F</span></div>
+      <div class="small" id="n-admin" style="opacity:.85"></div>
+      <button class="btn primary big block" id="n-go" style="margin-top:10px">Émettre la facture</button>
+    </div>`);
+  const washMode = () => $('#n-wash .on', v).dataset.w;
+  const pend = [];                   // photos prises avant d'émettre : { artId, dataUrl, note }
+  const setQty = (id, n) => { qty[id] = Math.max(0, n); const row = $(`.art[data-id="${id}"]`, v); if (row) { $('output', row).textContent = qty[id]; row.classList.toggle('on', qty[id] > 0); } };
+  const drawPend = () => { $('#n-pend', v).innerHTML = pend.map((p, i) => `<span class="pend"><img src="${p.dataUrl}" alt=""><span>${esc((arts.find((a) => a.id === p.artId) || {}).name || '?')}${p.note ? '<br><small>' + esc(p.note) + '</small>' : ''}</span><a href="#" data-pdx="${i}" aria-label="Retirer">✕</a></span>`).join(''); };
+  const drawDue = () => {
+    const d = P.dateConseillee(S, orders, { maison: washMode() === 'maison' }), cur = $('#n-due', v).value, why = d.raisons.length ? ' (' + esc(d.raisons.join(', ')) + ')' : '';
+    $('#n-duehint', v).innerHTML = d.value.slice(0, 10) === cur.slice(0, 10) ? (why ? 'Date conseillée' + why : '') : `Conseillé : ${fmtShort(d.value)}${why} · <a href="#" id="n-dueok">appliquer</a>`;
+    const a = $('#n-dueok', v); if (a) a.onclick = (e) => { e.preventDefault(); $('#n-due', v).value = d.value; drawDue(); };
+  };
+  let arrOpen = false;
+  const arrState = { fiche: false, inv: {}, other: 0, note: '' };
+  const lines = () => arts.filter((a) => qty[a.id] > 0).map((a) => ({ articleId: a.id, qty: qty[a.id], price: priceOf(a) }));
+  const drawPrices = () => {
+    for (const a of arts) {
+      const row = $(`.art[data-id="${a.id}"]`, v); if (!row) continue;
+      const p = priceOf(a), changed = p !== a.price;
+      const fromClient = client && client.prices && client.prices[a.id] != null && client.prices[a.id] === p;
+      $('.pv', row).innerHTML = changed ? `<s class="muted">${money(a.price)}</s> <b class="pchg">${money(p)}</b>${fromClient ? ' <span class="badge blue">prix client</span>' : ''}` : money(a.price);
+    }
+  };
+  const sums = () => {
+    let items = 0, est = 0, n = 0;
+    const home = washMode() === 'maison';
+    for (const a of arts) { const q2 = qty[a.id] || 0; items += q2 * priceOf(a); if (!a.homeWash && !home) est += q2 * a.weight; n += q2; }
+    const deliv = $('#n-deliv', v).checked ? Number(S.deliveryFee) || 0 : 0;
+    const cs = client && stats.find((x) => x.id === client.id);
+    const reward = cs ? L.loyaltyReward(S, cs.orders.length, items) : null;
+    const loyal = reward && loyaltyOn ? reward.amount : 0;
+    const ls = lines();
+    const promoList = promos.map((p) => ({ p, amount: L.promoAmount(p, ls, items) })).filter((x) => x.amount > 0);
+    const promoSum = promoList.filter((x) => promoOn[x.p.id]).reduce((a, x) => a + x.amount, 0);
+    const manual = Math.max(0, Math.round(Number($('#n-disc', v).value) || 0));
+    const discount = Math.min(items + deliv, loyal + promoSum + manual);
+    const arrFiche = arrOpen && arrState.fiche ? known.fiche : 0;
+    const arrInv = arrOpen ? known.invoices.filter((x) => arrState.inv[x.number]).reduce((a, x) => a + x.due, 0) : 0;
+    const arrOther = arrOpen ? Math.max(0, Math.round(arrState.other || 0)) : 0;
+    const arrears = arrFiche + arrInv + arrOther;
+    const sales = items + deliv - discount;
+    return { items, est, n, deliv, reward, loyal, promoList, promoSum, manual, discount, sales, arrFiche, arrInv, arrOther, arrears, total: sales + arrears };
+  };
+  const drawPromos = (s) => {
+    const html = s.promoList.map((x) => `<label class="check loyal"><input type="checkbox" data-promo="${x.p.id}" ${promoOn[x.p.id] ? 'checked' : ''}> 🏷️ ${esc(x.p.name)} : −${money(x.amount)}</label>`).join('')
+      + (s.reward ? `<label class="check loyal"><input type="checkbox" id="n-loyal-on" ${loyaltyOn ? 'checked' : ''}> 🎁 ${esc(s.reward.label)} : −${money(s.reward.amount)}</label>` : '');
+    const box = $('#n-promos', v);
+    if (box.dataset.h !== html) { box.innerHTML = html; box.dataset.h = html; }
+  };
+  const drawArrears = () => {
+    const box = $('#n-arr', v);
+    $('#n-arr-add', v).classList.toggle('hidden', arrOpen);
+    box.classList.toggle('hidden', !arrOpen);
+    if (!arrOpen) return;
+    const opts = [];
+    if (known.fiche > 0) opts.push(`<label class="check"><input type="checkbox" data-arr="fiche" ${arrState.fiche ? 'checked' : ''}> Ancien solde de la fiche : <b>${money(known.fiche)}</b></label>`);
+    for (const x of known.invoices) opts.push(`<label class="check"><input type="checkbox" data-arr="inv" data-n="${x.number}" ${arrState.inv[x.number] ? 'checked' : ''}> Reste de la facture N°${x.number} : <b>${money(x.due)}</b></label>`);
+    box.innerHTML = `<div class="row between"><b>Arriéré</b><button class="btn sm ghost" id="n-arr-x" type="button">Retirer</button></div>
+      ${client ? (opts.length ? `<p class="small muted" style="margin:0">Montants connus pour ce client :</p>${opts.join('')}` : '<p class="small muted" style="margin:0">Aucun ancien solde connu pour ce client.</p>') : '<p class="small muted" style="margin:0">Choisissez d’abord le client pour voir ses montants connus.</p>'}
+      <div class="grid2"><div><label class="f">Autre montant (F)</label><input class="i" id="n-arr-other" type="number" inputmode="numeric" min="0" value="${arrState.other || ''}" placeholder="0"></div>
+        <div><label class="f">Note</label><input class="i" id="n-arr-note" value="${esc(arrState.note)}" placeholder="ex. facture papier n°45"></div></div>`;
+    $('#n-arr-x', v).onclick = () => { arrOpen = false; drawArrears(); recalc(); };
+    $$('[data-arr]', box).forEach((cb) => { cb.onchange = () => {
+      if (cb.dataset.arr === 'fiche') arrState.fiche = cb.checked; else arrState.inv[cb.dataset.n] = cb.checked;
+      recalc();
+    }; });
+    $('#n-arr-other', v).oninput = (e) => { arrState.other = Number(e.target.value) || 0; recalc(); };
+    $('#n-arr-note', v).oninput = (e) => { arrState.note = e.target.value; };
+  };
+  const recalc = () => {
+    const s = sums();
+    const kgv = $('#n-kg', v).value;
+    const home = washMode() === 'maison';
+    const washKg = home ? 0 : kgv !== '' ? Number(kgv) : s.est;
+    const wash = Math.round(washKg * S.cousinRate);
+    $('#n-kg', v).placeholder = `estimé : ${L.kg(s.est)}`;
+    $('#n-kgbox', v).classList.toggle('hidden', home);
+    $('#n-washinfo', v).textContent = home ? 'Rien n’ira chez le cousin : pas de coût de lavage, pas de vérification au retour.' : 'Les articles « lavage maison » restent ici ; le reste part chez le cousin.';
+    $('#n-total', v).textContent = money(s.total);
+    $('#n-admin', v).textContent = [s.n ? `${s.n} pièce(s)` : '', s.discount ? `remise ${money(s.discount)}` : '', s.arrears ? `dont arriéré ${money(s.arrears)}` : '',
+      isAdmin() && s.n ? `lavage ${money(wash)} · marge ${money(s.sales - wash)}` : ''].filter(Boolean).join(' · ');
+    drawPromos(s);
+    const dep = Math.round(Number($('#n-dep', v).value) || 0);
+    $('#n-rest', v).textContent = s.total ? (dep >= s.total ? 'Facture soldée' : dep > 0 ? `Reste à payer : ${money(s.total - dep)}` : 'Rien payé pour l’instant') : '';
+
+    drawDue();
+  };
+  $('#n-promos', v).addEventListener('change', (e) => {
+    if (e.target.id === 'n-loyal-on') loyaltyOn = e.target.checked;
+    if (e.target.dataset.promo) promoOn[e.target.dataset.promo] = e.target.checked;
+    recalc();
+  });
+  // --- client : liste déroulante / nouveau client
+  const sorted = stats.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const showList = (text) => {
+    const t = (text || '').trim().toLowerCase(), d = t.replace(/\D/g, '');
+    const list = sorted.filter((c) => !t || c.name.toLowerCase().includes(t) || (c.firstName || '').toLowerCase().includes(t) || (d.length >= 3 && (c.phone || '').replace(/\D/g, '').includes(d))).slice(0, 60);
+    const box = $('#n-list', v);
+    box.innerHTML = list.map((c) => `<button type="button" data-cid="${c.id}"><b>${esc(c.name)}</b> <span class="muted">${esc(c.phone || '')}${c.orders.length ? ` · ${c.orders.length} cmd` : ''}</span></button>`).join('')
+      + (t ? `<button type="button" data-cid="new" class="newbtn">➕ Nouveau client « ${esc(text.trim())} »</button>` : '')
+      + (!list.length && !t ? '<div class="small muted" style="padding:10px">Aucun client enregistré : écrivez un nom.</div>' : '');
+    box.classList.remove('hidden');
+  };
+  const choose = async (c) => {
+    client = c; $('#n-list', v).classList.add('hidden'); $('#n-newc', v).classList.add('hidden');
+    prices = {}; for (const [id, p] of Object.entries(c.prices || {})) if (arts.find((a) => a.id === Number(id))) prices[id] = p;
+    drawPrices();
+    const cs = stats.find((x) => x.id === c.id) || { orders: [], spent: 0, due: 0 };
+    known = await L.knownArrears(c.id);
+    const lp = L.loyaltyProgress(S, cs.orders.length);
+    $('#n-client', v).value = L.clientDisplay(c);
+    $('#n-chosen', v).innerHTML = `<div class="client-chip"><b>${esc(L.civility(c.sex))} ${esc(L.clientDisplay(c))}</b>${c.phone ? ' · ' + esc(c.phone) : ''}
+      <br>${cs.orders.length ? `${cs.orders.length} commande(s) · ${money(cs.spent)} dépensés` : 'Aucune commande encore'}${cs.due + (c.arrears || 0) > 0 ? ` · <span style="color:var(--red)">doit ${money(cs.due + (c.arrears || 0))}</span>` : ''}
+      ${lp ? `<br><span class="small">Fidélité : ${lp.left === 0 ? 'cette commande est récompensée 🎁' : `récompense dans ${lp.left + 1} commande(s)`}</span>` : ''}
+      <br><a href="#" id="n-change" class="small">Changer de client</a></div>`;
+    $('#n-change', v).onclick = (e) => { e.preventDefault(); client = null; known = { fiche: 0, invoices: [] }; prices = {}; drawPrices(); $('#n-chosen', v).innerHTML = ''; $('#n-client', v).value = ''; $('#n-client', v).focus(); showList(''); drawArrears(); recalc(); };
+    if (cs.due + (c.arrears || 0) > 0 && !arrOpen) { arrOpen = true; }
+    drawArrears(); recalc();
+  };
+  const startNew = (text) => {
+    client = null; known = { fiche: 0, invoices: [] };
+    $('#n-list', v).classList.add('hidden'); $('#n-chosen', v).innerHTML = '';
+    const parts = text.trim().split(/\s+/);
+    $('#nc-last', v).value = (parts[0] || '').toUpperCase(); $('#nc-first', v).value = parts.slice(1).join(' ');
+    $('#n-newc', v).classList.remove('hidden'); drawArrears(); recalc();
+  };
+  $('#n-client', v).oninput = (e) => { client = null; $('#n-chosen', v).innerHTML = ''; showList(e.target.value); };
+  $('#n-client', v).onfocus = (e) => { if (!client) showList(e.target.value); };
+  $('#n-open', v).onclick = () => { const box = $('#n-list', v); if (box.classList.contains('hidden')) showList(client ? '' : $('#n-client', v).value); else box.classList.add('hidden'); };
+  $('#n-list', v).onclick = (e) => {
+    const b = e.target.closest('[data-cid]'); if (!b) return;
+    if (b.dataset.cid === 'new') startNew($('#n-client', v).value);
+    else choose(reg.find((c) => c.id === Number(b.dataset.cid)));
+  };
+  $('#nc-sex', v).onclick = (e) => { const a = e.target.closest('[data-sex]'); if (!a) return; $$('#nc-sex a', v).forEach((x) => x.classList.toggle('on', x === a)); };
+  // --- reste du formulaire
+  $('#n-wash', v).onclick = (e) => { const a = e.target.closest('[data-w]'); if (!a) return; $$('#n-wash a', v).forEach((x) => x.classList.toggle('on', x === a)); recalc(); };
+  $('#n-arr-add', v).onclick = () => { arrOpen = true; drawArrears(); recalc(); };
+  $('#n-arts', v).addEventListener('click', async (e) => {
+    const pe = e.target.closest('[data-pedit]');
+    if (pe) {
+      const a = arts.find((x) => x.id === Number(pe.dataset.pedit));
+      if (S.adminPin && !unlocked && !(client && client.prices && client.prices[a.id] != null)) {
+        const m0 = await ask({ title: 'Code administrateur', ok: 'Valider', body: '<input class="i pin" id="m-pin" type="password" inputmode="numeric">' });
+        if (!m0) return;
+        if ($('#m-pin', m0).value !== S.adminPin) { toast('Code incorrect', true); return; }
+        unlocked = true;
+      }
+      const who = client ? L.clientDisplay(client) : ($('#n-newc', v).classList.contains('hidden') ? '' : 'ce nouveau client');
+      const m = await ask({ title: `Prix : ${a.name}`, ok: 'Appliquer',
+        body: `<p class="small muted" style="margin:0 0 8px">Prix normal : ${money(a.price)}</p>
+          <input class="i" id="m-price" type="number" inputmode="numeric" min="0" value="${priceOf(a)}">
+          ${who ? `<label class="check"><input type="checkbox" id="m-keep" ${client && client.prices && client.prices[a.id] != null ? 'checked' : ''}> Retenir ce prix pour ${esc(who)}</label>` : '<p class="small muted">Choisissez le client pour pouvoir retenir ce prix.</p>'}
+          ${prices[a.id] != null ? '<button class="btn sm ghost" id="m-reset" type="button">Remettre le prix normal</button>' : ''}`,
+        onOpen: (bg) => { const r = $('#m-reset', bg); if (r) r.onclick = () => { $('#m-price', bg).value = a.price; }; } });
+      if (!m) return;
+      const val = Math.max(0, Math.round(Number($('#m-price', m).value) || 0));
+      if (val === a.price) delete prices[a.id]; else prices[a.id] = val;
+      const keep = $('#m-keep', m);
+      if (keep) remember[a.id] = keep.checked ? (val === a.price ? null : val) : (client && client.prices && client.prices[a.id] != null ? null : undefined);
+      drawPrices(); recalc(); return;
+    }
+    const b = e.target.closest('button[data-d]'); if (!b) return;
+    const row = b.closest('.art'); const id = Number(row.dataset.id);
+    qty[id] = Math.max(0, (qty[id] || 0) + Number(b.dataset.d));
+    $('output', row).textContent = qty[id];
+    row.classList.toggle('on', qty[id] > 0);
+    recalc();
+  });
+  ['#n-kg', '#n-disc', '#n-dep'].forEach((id) => { $(id, v).oninput = recalc; });
+  $('#n-full', v).onclick = () => { $('#n-dep', v).value = sums().total; recalc(); };
+  $('#n-deliv', v).onchange = () => { $('#n-dbox', v).classList.toggle('hidden', !$('#n-deliv', v).checked); recalc(); };
+  $('#n-at', v).onchange = () => { if ($('#n-at', v).value) $('#n-due', v).value = $('#n-at', v).value; };
+  $('#n-go', v).onclick = (e) => busy(e.currentTarget, async () => {
+    let c = client;
+    if (!c) {
+      if ($('#n-newc', v).classList.contains('hidden')) {
+        if ($('#n-client', v).value.trim()) { startNew($('#n-client', v).value); throw new Error('Complétez la fiche du nouveau client.'); }
+        throw new Error('Choisissez le client.');
+      }
+      const sexA = $('#nc-sex a.on', v);
+      if (!sexA) throw new Error('Choisissez Monsieur ou Madame.');
+      c = await L.saveClient({ lastName: $('#nc-last', v).value, firstName: $('#nc-first', v).value, sex: sexA.dataset.sex, phone: $('#nc-phone', v).value });
+    }
+    const s = sums();
+    const labels = [...s.promoList.filter((x) => promoOn[x.p.id]).map((x) => x.p.name), ...(s.loyal ? [s.reward.label] : []), ...(s.manual ? ['Remise'] : [])];
+    const arrNotes = [s.arrFiche ? 'ancien solde' : '', ...known.invoices.filter((x) => arrOpen && arrState.inv[x.number]).map((x) => `reste N°${x.number}`), s.arrOther ? (arrState.note.trim() || 'autre') : ''].filter(Boolean);
+    const o = await L.createOrder({
+      clientId: c.id, clientSex: c.sex, clientName: L.clientDisplay(c), clientPhone: c.phone, quantities: qty, prices,
+      weighedKg: washMode() === 'maison' ? '' : $('#n-kg', v).value, delivery: $('#n-deliv', v).checked,
+      deliveryPlace: $('#n-place', v).value, deliveryAt: $('#n-at', v).value, dueAt: $('#n-due', v).value,
+      discount: s.discount ? { amount: s.discount, label: labels.join(' + ') } : null,
+      arrears: s.arrears ? { amount: s.arrears, note: arrNotes.join(', ') } : null,
+      homeOnly: washMode() === 'maison', deposit: $('#n-dep', v).value,
+    });
+    const keep = Object.fromEntries(Object.entries(remember).filter(([, x]) => x !== undefined));
+    if (Object.keys(keep).length) await L.setClientPrices(c.id, keep);
+    if (s.arrears) await L.applyArrears(o, { fromFiche: s.arrFiche, fromInvoices: known.invoices.filter((x) => arrState.inv[x.number]).map((x) => x.number) });
+    if (pend.length) { // photos prises avant : rangées sur les pièces, avec les taches et dégâts notés
+      const used = new Set();
+      for (const p of pend) {
+        const nom = (arts.find((a) => a.id === p.artId) || {}).name;
+        const pc = o.pieces.find((x) => x.name === nom && !used.has(x.index)); if (!pc) continue;
+        used.add(pc.index); await L.savePhoto(pieceCode(o.number, pc.index), p.dataUrl); if (p.note) pc.note = p.note;
+      }
+      await L.saveOrder(o);
+    }
+    toast(`Facture N°${o.number} émise`);
+    location.hash = `#/order/${o.number}`;
+  });
+  // --- MonPressing : dictée, photo + IA, date conseillée
+  $('#n-due', v).addEventListener('input', drawDue);
+  $('#n-dict', v).onclick = (e) => busy(e.currentTarget, async () => {
+    toast('Parlez maintenant…');
+    const txt = String((await ecouter()) || '').trim();
+    if (!txt) throw new Error('Rien entendu, réessayez.');
+    let r = null;
+    if (iaPrete()) { try { r = await ia('dictee', { texte: txt, catalogue: arts.map((a) => a.name), clients: sorted.map((c) => c.name).slice(0, 300) }); } catch (err) { console.warn(err); } }
+    if (!r || !Array.isArray(r.lignes)) r = P.lireDictee(txt, arts, sorted);
+    let n = 0;
+    for (const l of r.lignes) { const a = findArt(arts, l.article); if (!a) continue; const k = Math.max(1, Number(l.qte) || 1); setQty(a.id, (qty[a.id] || 0) + k); n += k; }
+    if (r.client && !client) {
+      const t = String(r.client).toLowerCase();
+      const c = reg.find((x) => L.clientDisplay(x).toLowerCase() === t) || reg.find((x) => L.clientDisplay(x).toLowerCase().includes(t));
+      if (c) await choose(c); else { $('#n-client', v).value = r.client; showList(r.client); }
+    }
+    recalc(); toast(n ? `« ${txt} » : ${n} pièce(s) ajoutée(s), vérifiez.` : `« ${txt} » : aucun article reconnu.`, !n);
+  });
+  $('#n-photo', v).onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    const dataUrl = await L.resizeImage(f);
+    let artId = null, note = '';
+    if (iaPrete()) {
+      toast('L’IA regarde la photo…');
+      try { const r = await ia('photo_article', { image: dataUrl.split(',')[1], catalogue: arts.map((a) => a.name) }); const a = findArt(arts, r.article); if (a) artId = a.id; note = iaNote(r); }
+      catch (err) { toast('IA : ' + err.message, true); }
+    }
+    if (!artId) {
+      const m = await ask({ title: 'Quel vêtement ?', ok: 'Ajouter', body: `<select class="i" id="m-art">${arts.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select><label class="f" style="margin-top:8px">Taches ou dégâts (facultatif)</label><input class="i" id="m-note" value="${esc(note)}">` });
+      if (!m) return; artId = Number($('#m-art', m).value); note = $('#m-note', m).value.trim();
+    }
+    pend.push({ artId, dataUrl, note }); setQty(artId, (qty[artId] || 0) + 1); drawPend(); recalc();
+    toast(`${arts.find((a) => a.id === artId).name} ajouté${note ? ' · ' + note : ''}`);
+  };
+  $('#n-pend', v).onclick = (e) => { const x = e.target.closest('[data-pdx]'); if (!x) return; e.preventDefault(); const p = pend.splice(Number(x.dataset.pdx), 1)[0]; if (p) setQty(p.artId, (qty[p.artId] || 0) - 1); drawPend(); recalc(); };
+  if (q.get('cid')) { const c = reg.find((x) => x.id === Number(q.get('cid'))); if (c) await choose(c); }
+  drawArrears();
+  recalc();
+};
+
+routes.order = async (number) => {
+  setNav('list');
+  const o = await L.getOrder(number);
+  if (!o) { setTop({ title: 'Introuvable', back: '#/orders' }); view('<div class="empty">Cette facture n’existe pas.</div>'); return; }
+  setTop({ title: `Facture N°${o.number}`, back: '#/orders', right: badge(o) });
+  const t = orderTotals(o);
+  const act = L.nextAction(o);
+  const photos = {};
+  for (const p of o.pieces) photos[p.index] = await L.getPhoto(pieceCode(o.number, p.index));
+  const claims = o.claims || [];
+  const ready = o.status === STATUS.PRET && o.clientPhone;
+  const due = L.dueDate(o);
+  const v = view(`
+    ${ready ? `<button class="btn wa big block" id="o-ready" style="margin-bottom:10px">📲 Prévenir : « votre linge est prêt »</button>` : ''}
+    ${act ? `<button class="btn primary big block" id="o-act" style="margin-bottom:12px">${esc(act.label)}</button>` : ''}
+    ${L.lateness(o) === 'late' ? `<div class="alert" style="margin-bottom:12px">⏰ En retard : promis pour le ${fmtShort(due)}.</div>` : ''}
+    <div class="card">
+      <div class="row between"><div><a href="${o.clientId ? '#/client/' + o.clientId : '#/clients'}" style="color:inherit;text-decoration:none"><b style="font-size:1.1rem">${esc(o.clientName)} ›</b></a>
+        <div class="small muted">${o.clientPhone ? `<a href="tel:${esc(o.clientPhone)}">${esc(o.clientPhone)}</a> · ` : ''}${fmtDate(o.createdAt)}</div></div>
+        <span class="badge ${t.due <= 0 ? (t.transferred && t.paid < t.total ? 'blue' : 'green') : t.paid ? 'orange' : 'red'}">${t.due <= 0 ? (t.transferred && t.paid < t.total ? 'Reportée' : 'Payé') : t.paid ? 'Acompte' : 'Impayé'}</span></div>
+      ${steps(o)}
+      <div class="inv-lines">
+        ${o.items.map((i) => `<div class="l"><span>${i.qty} × ${esc(i.name)}${i.listPrice ? ` <span class="small muted">(${money(i.price)} au lieu de ${money(i.listPrice)})</span>` : ''}</span><span>${money(i.qty * i.price)}</span></div>`).join('')}
+        ${o.deliveryFee ? `<div class="l"><span>Livraison</span><span>${money(o.deliveryFee)}</span></div>` : ''}
+        ${t.discount ? `<div class="l"><span>${esc((o.discount && o.discount.label) || 'Remise')}</span><span>− ${money(t.discount)}</span></div>` : ''}
+        ${t.arrears ? `<div class="l"><span>Arriéré${o.arrears.note ? ' (' + esc(o.arrears.note) + ')' : ''}</span><span>${money(t.arrears)}</span></div>` : ''}
+        <div class="l total"><span>Total</span><span>${money(t.total)}</span></div>
+        ${t.paid > 0 && t.due > 0 ? `<div class="l"><span>Déjà payé</span><span>${money(t.paid)}</span></div><div class="l total" style="color:var(--red)"><span>Reste à payer</span><span>${money(t.due)}</span></div>` : ''}
+      </div>
+      ${due ? `<p class="small" style="margin:6px 0 0">⏰ À rendre le ${fmtShort(due)}</p>` : ''}
+      ${o.deliveryPlace || o.deliveryAt ? `<p class="small" style="margin:4px 0 0">🚚 ${esc(o.deliveryPlace || 'Lieu à préciser')}${o.deliveryAt ? ' · ' + fmtShort(o.deliveryAt) : ''}</p>` : ''}
+    </div>
+    ${o.note ? `<div class="note" style="margin-bottom:12px">Remarque : ${esc(o.note)}</div>` : ''}
+    ${(o.transfers || []).map((x) => `<div class="note" style="margin-bottom:12px">↪ Reste de ${money(x.amount)} reporté sur la <a href="#/order/${x.toOrder}">facture N°${x.toOrder}</a>.</div>`).join('')}
+    ${o.washMode === 'maison' ? '<p class="small muted" style="margin:-4px 0 10px">🏠 Lavage maison (ne va pas chez le cousin)</p>' : ''}
+    ${o.status === STATUS.LIVRE && o.clientPhone ? `<button class="btn wa block" id="o-thanks" style="margin-bottom:12px">💌 ${o.thanksSentAt ? 'Renvoyer' : 'Envoyer'} le remerciement</button>` : ''}
+    <div class="btns" style="margin-bottom:12px">
+      ${t.due > 0 ? `<button class="btn green" id="o-pay">Encaisser</button>` : ''}
+      <button class="btn navy" id="o-share">Envoyer le PDF</button>
+      <button class="btn" id="o-ticket">🧾 Ticket 58 mm</button>
+      <button class="btn" id="o-dl">Télécharger</button>
+      ${o.clientPhone ? `<button class="btn" id="o-wa">WhatsApp</button>` : ''}
+      <button class="btn" id="o-claim">⚠️ Réclamation</button>
+    </div>
+    ${o.status === STATUS.LIVRE && t.due > 0 && o.clientPhone ? `<div class="card row between"><div class="small">💬 ${(o.reminders || []).length ? `${o.reminders.length} relance(s), dernière le ${fmtDate(o.reminders[o.reminders.length - 1].at)}` : 'Pas encore relancé'}</div><button class="btn wa sm" id="o-remind">Relancer</button></div>` : ''}
+    ${(o.payments || []).length ? `<div class="card"><h2 style="margin-top:0">Paiements</h2><div class="calc">${o.payments.map((p) => `<div class="l"><span>${fmtDate(p.at)}${p.note ? ' · ' + esc(p.note) : ''}</span><span>${money(p.amount)}</span></div>`).join('')}</div>
+      ${isAdmin() ? `<button class="btn sm ghost" id="o-unpay" style="margin-top:8px">Annuler les paiements</button>` : ''}</div>` : ''}
+    ${claims.length ? `<h2>Réclamations</h2>${claims.map((c) => claimCard(o, c)).join('')}` : ''}
+    ${isAdmin() ? `<div class="card"><h2 style="margin-top:0">Coûts (admin)</h2>
+      <div class="calc"><div class="l"><span>Poids ${o.weighedKg != null ? 'pesé' : 'estimé'}</span><span>${L.kg(t.washKg)}</span></div>
+      <div class="l"><span>Lavage cousin (${money(o.cousinRate)}/kg)</span><span>− ${money(t.wash)}</span></div>
+      <div class="l sum"><span>Marge</span><span>${money(t.margin)}</span></div></div>
+      <div class="row" style="margin-top:10px"><input class="i grow" id="o-kg" type="number" inputmode="decimal" step="0.1" placeholder="Poids pesé (kg)" value="${o.weighedKg ?? ''}"><button class="btn sm" id="o-kgsave">Enregistrer</button></div>
+    </div>` : ''}
+    <h2>Photos des pièces</h2>
+    <div class="card">${o.pieces.map((p) => {
+      const ph = photos[p.index];
+      return `<div class="piece">${ph ? `<img class="thumb" src="${ph}" data-full="${p.index}">` : '<div class="thumb">—</div>'}
+        <div class="grow"><b>${esc(p.name)}</b><div class="small muted">Pièce ${p.index}/${o.pieces.length}${p.homeWash ? ' · maison' : ''}</div>${p.note ? `<div class="small" style="color:#a65200">⚠ ${esc(p.note)}</div>` : ''}${ph && iaPrete() ? `<button class="btn sm ghost" data-iaph="${p.index}" type="button" style="margin-top:4px">🔍 Taches et dégâts (IA)</button>` : ''}</div>
+        <label class="btn sm">${ph ? 'Refaire' : 'Photo'}<input type="file" accept="image/*" capture="environment" data-photo="${p.index}" hidden></label></div>`;
+    }).join('')}</div>
+    <h2>Historique</h2>
+    <div class="card timeline">${o.events.slice().reverse().map((e) => `<div class="ev"><span class="dot"></span><div><b>${esc(e.note && e.status === 0 ? e.note : STATUS_LABEL[e.status])}</b>${e.note && e.status !== 0 ? ' · ' + esc(e.note) : ''}<div class="small muted">${fmtDate(e.at)}</div></div></div>`).join('')}</div>
+    ${isAdmin() ? `<button class="btn danger block" id="o-del" style="margin-top:6px">Supprimer cette facture</button>` : ''}
+  `);
+  const reload = () => routes.order(number);
+  if (act) $('#o-act', v).onclick = (e) => busy(e.currentTarget, () => runAction(o.number, reload));
+  if ($('#o-ready', v)) $('#o-ready', v).onclick = () => openWa(o, waReady(o));
+  if ($('#o-thanks', v)) $('#o-thanks', v).onclick = () => offerThanks(o);
+  if ($('#o-remind', v)) $('#o-remind', v).onclick = async () => {
+    const reg = REG.find((c) => c.id === o.clientId);
+    const g = { key: 'o' + o.number, clientId: o.clientId, phone: o.clientPhone, sex: o.clientSex, name: o.clientName, first: reg, total: t.due, count: (o.reminders || []).length, items: [{ number: o.number, due: t.due, date: o.createdAt }] };
+    await sendReminder(g); reload();
+  };
+  const pdfName = `Facture-${o.number}-${fileSafe(o.clientName)}.pdf`;
+  $('#o-share', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const blob = await invoicePdf(o, S);
+    const r = await shareFile(blob, pdfName, `Facture N°${o.number}`);
+    if (r === 'downloaded' && o.clientPhone) openWa(o, waText(o));
+  });
+  $('#o-ticket', v).onclick = (e) => busy(e.currentTarget, async () => {
+    await shareFile(await ticketPdf(o, S), `Ticket-${o.number}.pdf`, `Ticket N°${o.number}`);
+  });
+  $('#o-dl', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const where = await saveFile(await invoicePdf(o, S), pdfName);
+    if (where) toast('Enregistré : ' + where);
+  });
+  if ($('#o-pay', v)) $('#o-pay', v).onclick = async () => {
+    const m = await ask({ title: 'Encaisser', ok: 'Enregistrer',
+      body: `<p>Reste à payer : <b>${money(t.due)}</b></p><label class="f">Montant reçu (F)</label><input class="i" id="m-amt" type="number" inputmode="numeric" value="${t.due}">` });
+    if (!m) return;
+    try { await L.addPayment(o, $('#m-amt', m).value, t.paid ? 'Paiement' : (Number($('#m-amt', m).value) >= t.due ? 'Paiement' : 'Acompte')); toast('Paiement enregistré'); reload(); }
+    catch (err) { toast(err.message, true); }
+  };
+  if ($('#o-unpay', v)) $('#o-unpay', v).onclick = async () => {
+    if (!(await ask({ title: 'Annuler tous les paiements ?', text: 'La facture redeviendra impayée.', ok: 'Annuler les paiements', danger: true }))) return;
+    await P.logJ('paiements_annules', o, orderTotals(o).paid); await L.clearPayments(o); toast('Paiements annulés'); reload();
+  };
+  if ($('#o-wa', v)) $('#o-wa', v).onclick = () => openWa(o, o.status === STATUS.PRET ? waReady(o) : waText(o));
+  $('#o-claim', v).onclick = () => newClaim(o, reload);
+  bindClaims(v, o, reload);
+  if ($('#o-kgsave', v)) $('#o-kgsave', v).onclick = async () => {
+    const val = $('#o-kg', v).value; o.weighedKg = val === '' ? null : Number(val);
+    await L.saveOrder(o); toast('Poids enregistré'); reload();
+  };
+  $$('[data-full]', v).forEach((img) => { img.onclick = () => showImage(img.src); });
+  $$('[data-iaph]', v).forEach((b) => { b.onclick = () => busy(b, async () => {
+    const p = o.pieces.find((x) => x.index === Number(b.dataset.iaph));
+    const r = await ia('photo_article', { image: String(photos[p.index]).split(',')[1], catalogue: [p.name] });
+    p.note = iaNote(r) || 'rien de visible'; await L.saveOrder(o); toast('Noté : ' + p.note); reload();
+  }); });
+  $$('[data-photo]', v).forEach((inp) => {
+    inp.onchange = async () => {
+      const f = inp.files[0]; if (!f) return;
+      try { await L.savePhoto(pieceCode(o.number, Number(inp.dataset.photo)), await L.resizeImage(f)); toast('Photo enregistrée'); reload(); }
+      catch (err) { toast(err.message, true); }
+    };
+  });
+  if ($('#o-del', v)) $('#o-del', v).onclick = async () => {
+    if (!(await ask({ title: `Supprimer la facture N°${o.number} ?`, text: 'La facture, ses pièces et ses photos seront effacées définitivement.', ok: 'Supprimer', danger: true }))) return;
+    await P.logJ('suppression', o, orderTotals(o).total); await L.deleteOrder(o); toast('Facture supprimée'); location.hash = '#/orders';
+  };
+};
+
+// ---------------------------------------------------------------- réclamations
+function claimCard(o, c) {
+  const piece = c.pieceIndex ? o.pieces.find((p) => p.index === c.pieceIndex) : null;
+  return `<div class="card edge ${c.status === 'open' ? 'late' : 'done'}">
+    <div class="row between"><b>${esc(L.CLAIM_TYPES[c.type] || c.type)}${piece ? ' · ' + esc(piece.name) + ` (pièce ${piece.index})` : ''}</b>
+      <span class="badge ${c.status === 'open' ? 'red' : 'green'}">${c.status === 'open' ? 'Ouverte' : 'Réglée'}</span></div>
+    ${c.note ? `<p class="small" style="margin:6px 0">${esc(c.note)}</p>` : ''}
+    <div class="small muted">Signalée le ${fmtDate(c.createdAt)}${c.resolvedAt ? ` · réglée le ${fmtDate(c.resolvedAt)}` : ''}</div>
+    ${c.resolution || c.compensation ? `<p class="small" style="margin:6px 0 0">✔ ${esc(c.resolution || '')}${c.compensation ? ` · dédommagement ${money(c.compensation)}` : ''}</p>` : ''}
+    ${c.status === 'open' ? `<button class="btn sm green" data-resolve="${c.id}" data-order="${o.number}" style="margin-top:8px">Marquer réglée</button>` : ''}
+  </div>`;
+}
+async function newClaim(o, after) {
+  const m = await ask({ title: `Réclamation · N°${o.number}`, ok: 'Enregistrer',
+    body: `<label class="f">Problème</label><select class="i" id="m-type">${Object.entries(L.CLAIM_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select>
+      <label class="f" style="margin-top:8px">Pièce concernée</label><select class="i" id="m-piece"><option value="">Toute la commande</option>${o.pieces.map((p) => `<option value="${p.index}">Pièce ${p.index} · ${esc(p.name)}</option>`).join('')}</select>
+      <label class="f" style="margin-top:8px">Détail</label><input class="i" id="m-note" placeholder="ex. trou sur la manche gauche">` });
+  if (!m) return;
+  await L.addClaim(o, { type: $('#m-type', m).value, pieceIndex: Number($('#m-piece', m).value) || null, note: $('#m-note', m).value });
+  toast('Réclamation enregistrée'); after && after();
+}
+function bindClaims(root, o, after) {
+  $$('[data-resolve]', root).forEach((b) => {
+    b.onclick = async () => {
+      const order = o || (await L.getOrder(b.dataset.order));
+      const m = await ask({ title: 'Régler la réclamation', ok: 'Marquer réglée',
+        body: `<label class="f">Solution</label><input class="i" id="m-res" placeholder="ex. relavée, client satisfait">
+          <label class="f" style="margin-top:8px">Dédommagement versé (F) — facultatif</label><input class="i" id="m-comp" type="number" inputmode="numeric" placeholder="0">
+          <p class="small muted" style="margin-top:6px">Un dédommagement est ajouté automatiquement aux dépenses.</p>` });
+      if (!m) return;
+      await L.resolveClaim(order, Number(b.dataset.resolve), { resolution: $('#m-res', m).value, compensation: $('#m-comp', m).value });
+      toast('Réclamation réglée'); after && after();
+    };
+  });
 }
 
-// ---------- Actions ----------
-const ACT = {}, FORMS = {}, ACT_CHANGE = {};
-ACT.modalBg = (a, e) => { if (e.target === a) closeModal(); };
-ACT.closeModal = closeModal;
-ACT.logout = () => { safeSet(LS_USER, null); render(); };
-ACT.copyTxt = () => { const t = $('#mtxt'); if (!t) return; (navigator.clipboard ? navigator.clipboard.writeText(t.value) : Promise.reject()).then(() => toast('Texte copié')).catch(() => { t.select(); try { document.execCommand('copy'); toast('Texte copié'); } catch { } }); };
-ACT.sendWa = a => { const txt = $('#mtxt')?.value || ''; if (isNative) { a.setAttribute('href', '#'); waOpen(a.dataset.wa, txt, {}); } else a.href = wa(a.dataset.wa, txt); if (a.dataset.rel) { const c = get('clients', a.dataset.rel); if (c) { c.derniereRelance = Date.now(); put('clients', c); } } };
-ACT.zoomPhoto = a => modal(`<img src="${a.src}" alt="" style="width:100%;border-radius:12px"><p class="mut">Photo prise au dépôt, avec date et heure : c'est votre preuve de l'état du vêtement.</p><button class="btn" data-act="closeModal">Fermer</button>`);
-// Nouvelle facture
-ACT.pickClient = a => { state.draft.clientId = a.dataset.id; state.draft.clientNom = ''; state.cq = ''; render(); };
-ACT.clearClient = () => { state.draft.clientId = null; render(); };
-ACT.addLigne = () => { const it = db.settings.catalogue[0] || { nom: 'Article', prix: 0 }; state.draft.lignes.push({ id: uid(), article: it.nom, qte: 1, prix: it.prix, notes: '', cousin: false }); render(); };
-ACT.delLigne = a => { state.draft.lignes.splice(+a.dataset.i, 1); render(); };
-ACT.cousinMode = a => { const d = state.draft; d.envoiCousin = a.dataset.v === '1'; if (!d.envoiCousin) d.lignes.forEach(l => l.cousin = false); render(); };
-ACT.applySugCousin = () => { const d = state.draft; d.envoiCousin = true; d.lignes.forEach(l => { if (suggestionCousin(l.article).oui) l.cousin = true; }); render(); };
-ACT.draftReset = async () => { if (await confirmBox('Effacer toute la facture en cours ?')) { state.draft = newDraft(); state.cq = ''; render(); } };
-ACT.dateAuto = () => { state.draft.dateManuelle = false; render(); };
-ACT.newFactClient = a => { state.draft = newDraft(a.dataset.id); go('nouvelle'); };
-ACT.dictee = () => {
-  const z = $('#dicteeZone');
-  if (!$('#dtxt')) z.innerHTML = `<div class="card ia" style="margin:10px 0 0"><b>Dictez la commande</b> <span class="mut">ex. « trois chemises, deux pantalons, un boubou bazin, express, pour Madame Houngbo »</span><textarea id="dtxt" rows="2" style="margin-top:6px" placeholder="Le texte dicté apparaît ici (vous pouvez aussi le taper)"></textarea><div class="row" style="margin-top:6px"><button class="btn sm p" data-act="dicteeOk">Ajouter ces articles</button><button class="btn sm" data-act="dictee">${ic('mic')}Parler encore</button></div></div>`;
-  ecouter(t => { const ta = $('#dtxt'); if (ta) ta.value = (ta.value ? ta.value + ', ' : '') + t; });
+function waText(o) {
+  const t = orderTotals(o);
+  const base = `Bonjour ${o.clientName}, ${S.name} : facture N°${o.number}, ${t.pieces} pièce(s), total ${money(t.total)}.`;
+  const pay = t.due <= 0 ? ' Réglée, merci.' : t.paid ? ` Payé ${money(t.paid)}, reste ${money(t.due)}.` : '';
+  const due = L.dueDate(o) ? ` À rendre le ${fmtShort(L.dueDate(o))}.` : '';
+  return base + pay + due + ' Merci de votre confiance !';
+}
+
+routes.orders = async (_, q) => {
+  setNav('list');
+  setTop({ title: 'Commandes' });
+  const filter = q.get('s') ?? 'open';
+  const all = await L.allOrders();
+  const chips = [['open', 'En cours'], ...STATUS_LABEL.map((l, i) => [String(i), l]), ['unpaid', 'Impayées'], ['today', 'Du jour'], ['all', 'Toutes']];
+  const v = view(`<form class="row" id="s-form" style="margin-bottom:10px"><input class="i grow" id="s-q" placeholder="Nom, téléphone ou N° de facture" autocomplete="off" value="${esc(q.get('q') || '')}"><button class="btn navy">Chercher</button></form>
+    <div id="s-res"></div>
+    <div class="chips">${chips.map(([k, l]) => `<a class="chip ${k === filter ? 'on' : ''}" href="#/orders?s=${k}">${l}</a>`).join('')}</div>
+    <div id="s-list"></div>`);
+  const today = L.todayIso();
+  const pick = (o) => filter === 'open' ? o.status !== STATUS.LIVRE
+    : filter === 'all' ? true : filter === 'unpaid' ? !o.paid
+    : filter === 'today' ? o.createdAt.slice(0, 10) === today : o.status === Number(filter);
+  const drawList = (text = '') => {
+    const t = text.trim().toLowerCase();
+    let list = all.filter(pick);
+    if (t) list = all.filter((o) => o.clientName.toLowerCase().includes(t) || (o.clientPhone || '').replace(/\s/g, '').includes(t.replace(/\s/g, '')) || String(o.number) === t);
+    $('#s-list', v).innerHTML = list.slice(0, 150).map((o) => orderCard(o)).join('') || '<div class="empty">Aucune commande ici.</div>';
+  };
+  $('#s-list', v).addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    busy(b, () => runAction(Number(b.dataset.act), () => routes.orders(_, q)));
+  });
+  $('#s-form', v).onsubmit = async (e) => {
+    e.preventDefault();
+    const text = $('#s-q', v).value;
+    const res = $('#s-res', v);
+    res.innerHTML = '';
+    if (L.parseCode(text)) {
+      const r = await L.findPiece(text);
+      if (!r || r.missing) { res.innerHTML = `<div class="flash err">Aucune commande pour ${esc(r ? r.code : text)}.</div>`; drawList(); return; }
+      const { order: o, piece: p } = r;
+      const ph = p ? await L.getPhoto(pieceCode(o.number, p.index)) : null;
+      res.innerHTML = `<a href="#/order/${o.number}" class="card" style="display:flex;gap:12px;align-items:center;text-decoration:none;color:inherit;border:2px solid var(--blue)">
+        ${ph ? `<img class="thumb" style="width:64px;height:64px;border-radius:10px;object-fit:cover" src="${ph}">` : ''}
+        <div class="grow">${p ? `<b>${esc(p.name)}</b> · Pièce ${p.index}/${o.pieces.length}<br>` : ''}<span class="small">N°${o.number} · ${esc(o.clientName)} · ${money(orderTotals(o).total)}</span></div>${badge(o)}</a>`;
+      drawList();
+    } else drawList(text);
+  };
+  $('#s-q', v).oninput = (e) => { if (!L.parseCode(e.target.value)) { $('#s-res', v).innerHTML = ''; drawList(e.target.value); } };
+  drawList(q.get('q') || '');
 };
-ACT.dicteeOk = async () => {
-  const txt = $('#dtxt')?.value.trim(), d = state.draft; if (!txt) return toast('Dictez ou tapez la commande.');
-  let r = null;
-  if (aiReady()) { toast('L\'IA lit la commande…'); try { r = await ai('dictee', { texte: txt, catalogue: db.settings.catalogue.map(c => c.nom), clients: all('clients').map(c => c.nom).slice(0, 300) }); } catch (e) { console.warn(e); } }
-  if (!r || !Array.isArray(r.lignes)) r = parseDictee(txt);
-  let n = 0;
-  r.lignes.forEach(x => { const it = catItem(x.article); if (!it) return; d.lignes.push({ id: uid(), article: it.nom, qte: Math.max(1, +x.qte || 1), prix: it.prix, notes: '', cousin: false }); n++; });
-  if (r.express) d.express = true;
-  if (r.client && !d.clientId) { const c = all('clients').find(c => norm(c.nom) === norm(r.client)) || all('clients').find(c => norm(c.nom).includes(norm(r.client))); if (c) d.clientId = c.id; else d.clientNom = r.client; }
-  render(); toast(n ? `${n} article(s) ajouté(s). Vérifiez avant d'enregistrer.` : 'Aucun article reconnu. Essayez avec les noms du catalogue.');
+
+routes.verify = async (number, q, stage) => {
+  setNav('none');
+  const o = await L.getOrder(number);
+  const expected = { cousin: STATUS.COUSIN, final: STATUS.REPASSE }[stage];
+  if (!o || o.status !== expected) { location.hash = `#/order/${number}`; return; }
+  const title = stage === 'cousin' ? 'Retour du cousin' : 'Vérification finale';
+  setTop({ title, back: `#/order/${o.number}` });
+  const v = view(`<div class="card">
+      <div class="row between"><b>N°${o.number} · ${esc(o.clientName)}</b><span id="v-count" class="badge blue"></span></div>
+      <div class="progress" style="margin-top:10px"><i id="v-bar"></i></div>
+      <p class="small muted" style="margin:8px 0 0">Touchez chaque pièce quand vous l’avez bien en main.</p></div>
+    <div class="card" id="v-list"></div>
+    <div class="card stack"><label class="f">Remarque / écart</label><input class="i" id="v-note" placeholder="ex. bouton manquant, tache…"><button class="btn sm" id="v-gap">Signaler un écart</button></div>
+    <button class="btn green big block" id="v-ok" disabled>${stage === 'cousin' ? 'Valider : transmettre au repasseur' : 'Valider : commande prête'}</button>`);
+  const photos = {};
+  for (const p of o.pieces) photos[p.index] = await L.getPhoto(pieceCode(o.number, p.index));
+  const draw = () => {
+    const list = L.stagePieces(o, stage);
+    const done = list.filter((p) => p.checks && p.checks[stage]).length;
+    $('#v-count', v).textContent = `${done}/${list.length} pièces vérifiées`;
+    $('#v-bar', v).style.width = (list.length ? (done / list.length) * 100 : 100) + '%';
+    $('#v-list', v).innerHTML = list.map((p) => {
+      const ok = p.checks && p.checks[stage];
+      return `<div class="piece tap ${ok ? 'ok' : ''}" data-idx="${p.index}"><span class="tick">${ok ? '✓' : ''}</span>
+        <div class="grow"><b>${esc(p.name)}</b><div class="small muted">Pièce ${p.index}/${o.pieces.length}</div></div>
+        ${photos[p.index] ? `<img class="thumb" src="${photos[p.index]}" data-full="1">` : ''}</div>`;
+    }).join('') + (stage === 'cousin' && o.pieces.some((p) => p.homeWash) ? `<p class="small muted">Les pièces « lavage maison » ne sont pas demandées ici.</p>` : '');
+    $('#v-ok', v).disabled = !L.stageComplete(o, stage);
+  };
+  $('#v-list', v).onclick = async (e) => {
+    const img = e.target.closest('[data-full]');
+    if (img) { showImage(img.src); return; }
+    const row = e.target.closest('[data-idx]'); if (!row) return;
+    const on = await L.togglePiece(o, stage, Number(row.dataset.idx));
+    beep(on);
+    draw();
+    if (on && L.stageComplete(o, stage)) toast('Toutes les pièces sont vérifiées');
+  };
+  $('#v-gap', v).onclick = async () => {
+    const n = $('#v-note', v).value; if (!n.trim()) return;
+    await L.reportGap(o, n); $('#v-note', v).value = ''; toast('Écart enregistré');
+  };
+  $('#v-ok', v).onclick = (e) => busy(e.currentTarget, async () => {
+    await L.advance(o, stage === 'cousin' ? STATUS.A_REPASSER : STATUS.PRET);
+    toast(stage === 'cousin' ? 'Transmis au repassage' : 'Commande prête');
+    if (stage === 'final' && o.clientPhone && await ask({ title: 'Prévenir le client ?', text: `« ${waReady(o).split('\n')[0]} »`, ok: '📲 WhatsApp', cancel: 'Plus tard' })) openWa(o, waReady(o));
+    location.hash = `#/order/${o.number}`;
+  });
+  draw();
 };
-ACT_CHANGE.photoLigne = async t => {
-  const file = t.files[0]; if (!file) return; const d = state.draft, cat = db.settings.catalogue;
-  const dataUrl = await compressImage(file), pid = 'ph_' + uid(); await photoSave(pid, dataUrl);
-  const l = { id: uid(), article: cat[0]?.nom || 'Article', qte: 1, prix: cat[0]?.prix || 0, photoId: pid, notes: '', cousin: false };
-  d.lignes.push(l); render();
-  if (!aiReady()) return toast('Photo ajoutée. Choisissez l\'article (IA hors ligne).');
-  toast('L\'IA analyse la photo…');
+
+routes.ironing = async () => {
+  setNav('more');
+  const list = (await L.allOrders()).filter((o) => o.status === STATUS.A_REPASSER)
+    .sort((a, b) => (a.deliveryAt || '9999').localeCompare(b.deliveryAt || '9999') || a.number - b.number);
+  setTop({ title: 'À repasser', right: `<span class="pill">${list.length} commande(s)</span>` });
+  const v = view(list.map((o) => `<div class="card edge orange">
+      <div class="row between"><b>N°${o.number} · ${esc(o.clientName)}</b><span class="badge blue">${o.pieces.length} pièces</span></div>
+      <p style="margin:8px 0">${esc(L.itemsSummary(o))}</p>
+      ${o.note ? `<div class="note small" style="margin-bottom:8px">Remarque : ${esc(o.note)}</div>` : ''}
+      ${o.deliveryAt ? `<p class="small muted" style="margin:0 0 8px">Livraison prévue : ${fmtShort(o.deliveryAt)}</p>` : ''}
+      <button class="btn primary block" data-done="${o.number}">Repassage terminé</button></div>`).join('') || '<div class="empty">Rien à repasser pour l’instant. 👍</div>');
+  v.onclick = (e) => {
+    const b = e.target.closest('[data-done]'); if (!b) return;
+    busy(b, async () => { const o = await L.getOrder(b.dataset.done); await L.advance(o, STATUS.REPASSE); toast(`N°${o.number} repassée`); routes.ironing(); });
+  };
+};
+
+routes.deliveries = async () => {
+  setNav('truck');
+  const list = (await L.allOrders()).filter((o) => o.status === STATUS.PRET)
+    .sort((a, b) => (a.deliveryAt || '9999').localeCompare(b.deliveryAt || '9999') || a.number - b.number);
+  setTop({ title: 'Livraisons', right: `<span class="pill">${list.length} prête(s)</span>` });
+  const v = view(list.map((o) => {
+    const t = orderTotals(o);
+    return `<div class="card edge green">
+      <div class="row between"><a href="#/order/${o.number}" style="color:inherit;text-decoration:none"><b>N°${o.number} · ${esc(o.clientName)}</b></a><span class="badge green">${t.pieces} pièces</span></div>
+      <div class="small" style="margin:8px 0;line-height:1.7">
+        ${o.deliveryFee || o.deliveryPlace ? `Lieu : <b>${esc(o.deliveryPlace || 'à préciser')}</b><br>` : 'Retrait au pressing<br>'}
+        ${o.deliveryAt ? `Heure : <b>${fmtShort(o.deliveryAt)}</b><br>` : ''}
+        ${o.clientPhone ? `Client : <a href="tel:${esc(o.clientPhone)}">${esc(o.clientPhone)}</a><br>` : ''}
+        ${t.due <= 0 ? '<span class="badge green">Déjà payé</span>' : `À encaisser : <b>${money(t.due)}</b>${t.paid ? ` <span class="small muted">(acompte ${money(t.paid)} reçu)</span>` : ''}`}</div>
+      ${t.due <= 0 ? '' : `<label class="check"><input type="checkbox" data-cash="${o.number}"> ${money(t.due)} encaissés</label>`}
+      <div class="btns"><button class="btn green" data-deliv="${o.number}">Livré</button>
+      ${o.clientPhone ? `<button class="btn" data-wa="${o.number}">WhatsApp</button>` : '<span></span>'}</div></div>`;
+  }).join('') || '<div class="empty">Aucune commande prête.</div>');
+  v.onclick = async (e) => {
+    const d = e.target.closest('[data-deliv]');
+    if (d) {
+      const o = await L.getOrder(d.dataset.deliv);
+      const cb = $(`[data-cash="${o.number}"]`, v);
+      if (await deliverFlow(o, cb ? cb.checked : null)) routes.deliveries();
+      return;
+    }
+    const w = e.target.closest('[data-wa]');
+    if (w) { const o = await L.getOrder(w.dataset.wa); openWa(o, waReady(o)); }
+  };
+};
+
+routes.clients = async (_, q) => {
+  setNav('more');
+  setTop({ title: 'Clients', back: '#/more', right: '<a class="pill" href="#/clientform" style="text-decoration:none">+ Ajouter</a>' });
+  const sort = q.get('t') || 'name';
+  const all = L.clientsWithStats(await L.getClientsReg(), await db.all('orders'));
+  const sorters = { name: (a, b) => a.name.localeCompare(b.name), spent: (a, b) => b.spent - a.spent, recent: (a, b) => b.lastAt.localeCompare(a.lastAt), due: (a, b) => b.totalDue - a.totalDue, count: (a, b) => b.orders.length - a.orders.length };
+  const v = view(`<input class="i" id="c-q" placeholder="Chercher un nom ou un numéro" autocomplete="off" style="margin-bottom:10px">
+    <div class="chips">${[['name', 'A → Z'], ['spent', 'Meilleurs clients'], ['recent', 'Récents'], ['count', 'Plus fidèles'], ['due', 'Qui doivent']].map(([k, l]) => `<a class="chip ${k === sort ? 'on' : ''}" href="#/clients?t=${k}">${l}</a>`).join('')}</div>
+    <p class="small muted" style="margin:0 0 8px">${all.length} client(s)</p>
+    <div id="c-list"></div>`);
+  const draw = (text = '') => {
+    const t = text.trim().toLowerCase(), d = t.replace(/\D/g, '');
+    let list = all.slice().sort(sorters[sort]);
+    if (sort === 'due') list = list.filter((c) => c.totalDue > 0);
+    if (t) list = list.filter((c) => c.name.toLowerCase().includes(t) || (d.length >= 3 && (c.phone || '').replace(/\D/g, '').includes(d)));
+    $('#c-list', v).innerHTML = list.slice(0, 300).map((c, i) => `<a class="card client-row" href="#/client/${c.id}">
+      <span class="rank">${sort === 'spent' && !t ? i + 1 : c.sex === 'F' ? '👩' : c.sex === 'M' ? '👨' : '👤'}</span>
+      <div class="grow"><b>${esc(c.name)}</b><div class="small muted">${esc(c.phone || 'sans numéro')} · ${c.orders.length} commande(s)${c.orders.length ? ' · dernière ' + fmtDate(c.lastAt, false) : ''}</div></div>
+      <div class="right"><b>${money(c.spent)}</b>${c.totalDue > 0 ? `<div class="small" style="color:var(--red)">doit ${money(c.totalDue)}</div>` : ''}</div></a>`).join('') || '<div class="empty">Aucun client.</div>';
+  };
+  $('#c-q', v).oninput = (e) => draw(e.target.value);
+  draw();
+};
+
+routes.clientform = async (id) => {
+  setNav('more');
+  const c = id ? await L.getClientReg(Number(id)) : null;
+  setTop({ title: c ? 'Modifier le client' : 'Nouveau client', back: c ? `#/client/${c.id}` : '#/clients' });
+  const v = view(`<div class="card stack">
+      <div class="grid2"><div><label class="f">Nom</label><input class="i" id="cf-last" autocapitalize="characters" value="${esc(c ? c.lastName : '')}"></div>
+        <div><label class="f">Prénom</label><input class="i" id="cf-first" autocapitalize="words" value="${esc(c ? c.firstName : '')}"></div></div>
+      <label class="f">Sexe</label>
+      <div class="seg sex" id="cf-sex"><a data-sex="M" class="${c && c.sex === 'M' ? 'on' : ''}">Monsieur</a><a data-sex="F" class="${c && c.sex === 'F' ? 'on' : ''}">Madame</a></div>
+      <div><label class="f">Numéro WhatsApp</label><input class="i" id="cf-phone" type="tel" inputmode="tel" value="${esc(c ? c.phone : '')}" placeholder="ex. 01 97 00 00 00"></div>
+      <div><label class="f">Ancien solde / arriéré (F) — ce qu'il doit déjà</label><input class="i" id="cf-arr" type="number" inputmode="numeric" min="0" value="${c && c.arrears ? c.arrears : ''}" placeholder="0"></div>
+      <div><label class="f">Note</label><input class="i" id="cf-note" value="${esc(c ? c.note : '')}" placeholder="ex. client du quartier, préfère la livraison"></div>
+      <button class="btn primary big block" id="cf-save">${c ? 'Enregistrer' : 'Ajouter le client'}</button>
+    </div>`);
+  $('#cf-sex', v).onclick = (e) => { const a = e.target.closest('[data-sex]'); if (!a) return; $$('#cf-sex a', v).forEach((x) => x.classList.toggle('on', x === a)); };
+  $('#cf-save', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const sexA = $('#cf-sex a.on', v);
+    if (!sexA) throw new Error('Choisissez Monsieur ou Madame.');
+    const rec = await L.saveClient({ ...(c || {}), lastName: $('#cf-last', v).value, firstName: $('#cf-first', v).value, sex: sexA.dataset.sex, phone: $('#cf-phone', v).value, arrears: $('#cf-arr', v).value, note: $('#cf-note', v).value });
+    toast(c ? 'Client modifié' : 'Client ajouté');
+    location.hash = `#/client/${rec.id}`;
+  });
+};
+
+routes.client = async (id) => {
+  setNav('more');
+  const reg = await L.getClientsReg();
+  const c = L.clientsWithStats(reg, await db.all('orders')).find((x) => x.id === Number(id));
+  setTop({ title: 'Fiche client', back: '#/clients', right: c ? `<a class="pill" href="#/clientform/${c.id}" style="text-decoration:none">Modifier</a>` : '' });
+  if (!c) { view('<div class="empty">Client introuvable.</div>'); return; }
+  const lp = L.loyaltyProgress(S, c.orders.length);
+  const artsAll = await L.getArticles();
+  const fav = {};
+  for (const o of c.orders) for (const i of o.items) fav[i.name] = (fav[i.name] || 0) + i.qty;
+  const favs = Object.entries(fav).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const v = view(`<div class="hero"><span>${L.civility(c.sex)}${c.orders.length ? ` · ${c.orders.length} commande(s) depuis le ${fmtDate(c.firstAt, false)}` : ' · nouveau client'}</span><b>${esc(c.name)}</b>
+      <small>${esc(c.phone || 'sans numéro')}${c.note ? ' · ' + esc(c.note) : ''}</small></div>
+    <div class="kpis" style="margin-top:10px">
+      <div class="kpi"><span>Total dépensé</span><b>${money(c.spent)}</b></div>
+      <div class="kpi"><span>Panier moyen</span><b>${money(c.orders.length ? c.spent / c.orders.length : 0)}</b></div>
+      <div class="kpi"><span>Pièces confiées</span><b>${c.pieces}</b></div>
+      <div class="kpi"><span>Doit en tout</span><b style="color:${c.totalDue ? 'var(--red)' : 'inherit'}">${money(c.totalDue)}</b>${c.arrears ? `<span>dont ancien solde ${money(c.arrears)}</span>` : ''}</div></div>
+    ${lp ? `<div class="card" style="margin-top:12px"><h3 class="ch-title">🎁 Fidélité</h3>
+      <div class="dots">${Array.from({ length: lp.every }, (_, i) => `<i class="${i < lp.done ? 'on' : ''} ${i === lp.every - 1 ? 'gift' : ''}"></i>`).join('')}</div>
+      <p class="small" style="margin:8px 0 0">${lp.left === 0 ? '<b>Sa prochaine commande est récompensée !</b>' : `Encore ${lp.left + 1} commande(s) avant la récompense`}.</p></div>` : ''}
+    <div class="btns" style="margin:12px 0">
+      <a class="btn primary" href="#/new?cid=${c.id}">+ Nouvelle facture</a>
+      ${c.phone ? `<button class="btn wa" id="cl-wa">WhatsApp</button>` : '<span></span>'}
+    </div>
+    ${Object.keys(c.prices || {}).length ? `<div class="card"><h3 class="ch-title">💲 Prix spécifiques</h3><div class="calc">${Object.entries(c.prices).map(([id, p]) => { const a = artsAll.find((x) => x.id === Number(id)); return a ? `<div class="l"><span>${esc(a.name)} <s class="muted small">${money(a.price)}</s></span><span><b>${money(p)}</b> <button class="btn sm danger" data-pdel="${id}" style="min-height:30px;padding:2px 8px">✕</button></span></div>` : ''; }).join('')}</div>
+      <p class="small muted" style="margin:6px 0 0">Pour ajouter un prix : à la facture, touchez ✎ à côté du prix et cochez « Retenir ».</p></div>` : ''}
+    ${favs.length ? `<div class="card"><h3 class="ch-title">Ce qu'il confie le plus</h3>${Charts.hbars(favs, (n) => n + ' pcs')}</div>` : ''}
+    ${c.orders.length ? `<h2>Historique</h2>${c.orders.slice().reverse().map((o) => orderCard(o, { showAction: false })).join('')}` : ''}`);
+  Charts.enableTips(v);
+  $$('[data-pdel]', v).forEach((b) => { b.onclick = async () => {
+    if (needAdmin('client/' + c.id)) return;
+    await L.setClientPrices(c.id, { [b.dataset.pdel]: null }); toast('Prix retiré'); routes.client(id);
+  }; });
+  if ($('#cl-wa', v)) $('#cl-wa', v).onclick = () => waOpen(c.phone, `Bonjour ${L.civility(c.sex)} ${String(c.firstName || '').trim() || String(c.lastName).toUpperCase()},`, S);
+};
+
+routes.promos = async () => {
+  if (needAdmin('promos')) return;
+  setNav('more');
+  setTop({ title: 'Promotions', back: '#/more', right: '<a class="pill" href="#/promoform" style="text-decoration:none">+ Ajouter</a>' });
+  const list = await L.getPromos();
+  const arts = await L.getArticles();
+  const v = view(`<p class="small muted" style="margin:0 0 10px">Les promotions <b>automatiques</b> s'appliquent seules sur la facture ; les autres y sont proposées à cocher.</p>
+    ${list.map((p) => `<div class="card edge ${p.active && L.promoActiveNow(p) ? 'green' : 'done'}">
+      <div class="row between"><b>${esc(p.name)}</b><label class="switch"><input type="checkbox" data-toggle="${p.id}" ${p.active ? 'checked' : ''}><span></span></label></div>
+      <p class="small" style="margin:6px 0">${esc(L.promoDescription(p, arts))}</p>
+      <div class="small muted">${p.auto ? '⚡ Automatique' : '☑️ Au choix sur la facture'}${p.active && !L.promoActiveNow(p) ? ' · pas valable aujourd’hui' : ''}</div>
+      <div class="btns" style="margin-top:8px"><a class="btn sm" href="#/promoform/${p.id}">Modifier</a><button class="btn sm danger" data-pdel="${p.id}">Supprimer</button></div></div>`).join('') || '<div class="empty">Aucune promotion. Touchez « + Ajouter ».</div>'}
+    <h2>💡 Idées de promotions</h2><div id="pr-idees"></div>`);
+  const idees = [...P.ideesPromos(await db.all('orders'), arts), ...PROMO_IA];
+  const drawIdees = () => { $('#pr-idees', v).innerHTML = idees.map((p, i) => `<div class="card edge blue"><div class="row between"><b>${esc(p.name)}</b><span class="badge blue">${p.type === 'percent' ? '−' + p.value + ' %' : '−' + money(p.value)}</span></div><p class="small" style="margin:6px 0">${esc(p.raison || '')}</p><p class="small muted" style="margin:0 0 8px">${esc(L.promoDescription(p, arts))}</p><button class="btn sm primary" data-idee="${i}">Créer cette promotion</button></div>`).join('') + (iaPrete() ? '<button class="btn block" id="pr-ia">✨ Plus d’idées avec l’IA</button>' : (idees.length ? '' : '<p class="small muted">Pas d’idée pour le moment.</p>') + '<p class="small muted">Avec l’IA (Plus › Intelligence artificielle), l’appli propose aussi des idées sur mesure.</p>'); };
+  drawIdees();
+  v.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-idee]');
+    if (b) { const p = { ...idees[Number(b.dataset.idee)] }; delete p.raison; await db.kv('promoDraft', p); location.hash = '#/promoform'; return; }
+    const g = e.target.closest('#pr-ia'); if (!g) return;
+    busy(g, async () => {
+      const orders = await db.all('orders'), by = [0, 0, 0, 0, 0, 0, 0];
+      for (const o of orders.filter((x) => Date.now() - new Date(x.createdAt.slice(0, 19)).getTime() < 56 * 864e5)) by[new Date(o.createdAt.slice(0, 19)).getDay()] += orderTotals(o).sales;
+      const r = await ia('promos', { date: L.todayIso(), stats: { chiffre_par_jour_8_semaines: Object.fromEntries(P.JOURS.map((j, i) => [j, by[i]])), articles: arts.map((a) => a.name + ' ' + a.price + ' F'), promotions_existantes: list.map((p) => p.name) }, evenements: P.evenementsProches(75).map((e2) => ({ nom: e2.nom, date: e2.date.toISOString().slice(0, 10) })) });
+      for (const x of Array.isArray(r) ? r : []) {
+        const ids = (x.articles || []).map((n) => (findArt(arts, n) || {}).id).filter(Boolean);
+        PROMO_IA.push({ name: x.nom || 'Promotion', type: x.type === 'montant' ? 'amount' : 'percent', value: Number(x.valeur) || 10, scope: ids.length ? 'articles' : 'all', articles: ids, minAmount: Number(x.minimum) || 0, from: x.debut || '', to: x.fin || '', days: (x.jours || []).map((d) => (Number(d) + 6) % 7), auto: false, active: true, raison: '✨ ' + (x.raison || '') });
+      }
+      routes.promos();
+    });
+  });
+  v.onchange = async (e) => {
+    const t = e.target.closest('[data-toggle]'); if (!t) return;
+    const l = await L.getPromos(); const p = l.find((x) => x.id === Number(t.dataset.toggle)); p.active = t.checked;
+    await L.savePromos(l); toast(p.active ? 'Promotion activée' : 'Promotion désactivée'); routes.promos();
+  };
+  v.onclick = async (e) => {
+    const d = e.target.closest('[data-pdel]'); if (!d) return;
+    if (!(await ask({ title: 'Supprimer cette promotion ?', text: 'Les factures déjà faites gardent leur remise.', ok: 'Supprimer', danger: true }))) return;
+    await L.savePromos((await L.getPromos()).filter((x) => x.id !== Number(d.dataset.pdel))); routes.promos();
+  };
+};
+
+routes.promoform = async (id) => {
+  if (needAdmin('promos')) return;
+  setNav('more');
+  const p = id ? (await L.getPromos()).find((x) => x.id === Number(id)) : null;
+  const draft = !id ? await db.kv('promoDraft') : null;   // idée choisie dans « Idées de promotions »
+  if (draft) await db.kv('promoDraft', null);
+  const arts = await L.getArticles();
+  const cur = p || { name: '', type: 'percent', value: 10, scope: 'all', articles: [], minAmount: 0, from: '', to: '', days: [], auto: true, active: true, ...(draft || {}) };
+  setTop({ title: p ? 'Modifier la promotion' : 'Nouvelle promotion', back: '#/promos' });
+  const v = view(`<div class="card stack">
+      <div><label class="f">Nom (affiché sur la facture)</label><input class="i" id="pf-name" value="${esc(cur.name)}" placeholder="ex. Promo Tabaski, Mercredi chemises"></div>
+      <div class="grid2"><div><label class="f">Remise</label><input class="i" id="pf-val" type="number" min="0" value="${cur.value}"></div>
+        <div><label class="f">Type</label><select class="i" id="pf-type">
+          <option value="percent" ${cur.type === 'percent' ? 'selected' : ''}>%</option>
+          <option value="amount" ${cur.type === 'amount' ? 'selected' : ''}>F (sur la commande)</option>
+          <option value="perPiece" ${cur.type === 'perPiece' ? 'selected' : ''}>F par pièce</option></select></div></div>
+      <label class="f">S'applique sur</label>
+      <div class="seg" id="pf-scope"><a data-s="all" class="${cur.scope !== 'articles' ? 'on' : ''}">Toute la commande</a><a data-s="articles" class="${cur.scope === 'articles' ? 'on' : ''}">Certains articles</a></div>
+      <div id="pf-arts" class="${cur.scope === 'articles' ? '' : 'hidden'}">${arts.map((a) => `<label class="check"><input type="checkbox" value="${a.id}" ${(cur.articles || []).includes(a.id) ? 'checked' : ''}> ${esc(a.name)} <span class="muted small">${money(a.price)}</span></label>`).join('')}</div>
+      <div><label class="f">Minimum de commande (F, articles) — facultatif</label><input class="i" id="pf-min" type="number" min="0" value="${cur.minAmount || ''}" placeholder="0 = aucun"></div>
+      <div class="grid2"><div><label class="f">Du — facultatif</label><input class="i" id="pf-from" type="date" value="${cur.from || ''}"></div>
+        <div><label class="f">Au — facultatif</label><input class="i" id="pf-to" type="date" value="${cur.to || ''}"></div></div>
+      <label class="f">Jours de la semaine (aucun coché = tous les jours)</label>
+      <div class="days" id="pf-days">${L.PROMO_DAYS.map((d, i) => `<a data-d="${i}" class="${(cur.days || []).includes(i) ? 'on' : ''}">${d}</a>`).join('')}</div>
+      <label class="check"><input type="checkbox" id="pf-auto" ${cur.auto ? 'checked' : ''}> ⚡ Appliquer automatiquement (sinon, proposée à cocher)</label>
+      <label class="check"><input type="checkbox" id="pf-active" ${cur.active ? 'checked' : ''}> Promotion active</label>
+      <button class="btn primary big block" id="pf-save">${p ? 'Enregistrer' : 'Créer la promotion'}</button>
+    </div>`);
+  $('#pf-scope', v).onclick = (e) => { const a = e.target.closest('[data-s]'); if (!a) return; $$('#pf-scope a', v).forEach((x) => x.classList.toggle('on', x === a)); $('#pf-arts', v).classList.toggle('hidden', a.dataset.s !== 'articles'); };
+  $('#pf-days', v).onclick = (e) => { const a = e.target.closest('[data-d]'); if (a) a.classList.toggle('on'); };
+  $('#pf-save', v).onclick = async () => {
+    const rec = {
+      ...cur, id: cur.id || Date.now(), name: $('#pf-name', v).value.trim(), type: $('#pf-type', v).value, value: Number($('#pf-val', v).value) || 0,
+      scope: $('#pf-scope a.on', v).dataset.s, articles: $$('#pf-arts input:checked', v).map((x) => Number(x.value)),
+      minAmount: Number($('#pf-min', v).value) || 0, from: $('#pf-from', v).value, to: $('#pf-to', v).value,
+      days: $$('#pf-days a.on', v).map((x) => Number(x.dataset.d)), auto: $('#pf-auto', v).checked, active: $('#pf-active', v).checked,
+    };
+    if (!rec.name) { toast('Donnez un nom à la promotion', true); return; }
+    if (rec.value <= 0) { toast('Indiquez le montant de la remise', true); return; }
+    if (rec.scope === 'articles' && !rec.articles.length) { toast('Cochez au moins un article', true); return; }
+    if (rec.type === 'percent' && rec.value > 100) { toast('100 % maximum', true); return; }
+    const list = (await L.getPromos()).filter((x) => x.id !== rec.id); list.push(rec);
+    await L.savePromos(list); toast('Promotion enregistrée'); location.hash = '#/promos';
+  };
+};
+
+routes.reminders = async () => {
+  setNav('more');
+  setTop({ title: 'Relances des impayés', back: '#/more' });
+  const orders = await db.all('orders');
+  const plan = L.reminderPlan(orders, REG, S);
+  const profil = (g) => { const o = orders.find((x) => g.items.some((i) => i.number === x.number)); return o ? P.risque(P.groupeClient(orders, o)) : null; };
+  const rowPlus = (g) => { const r = profil(g); return (r ? reminderRow(g).replace('</div></div>', ` · <span class="badge ${r.tone}">${r.label}</span></div></div>`) : reminderRow(g)) + (iaPrete() ? `<button class="btn sm ghost block" data-remia="${esc(g.key)}" style="margin:0 0 8px">✨ Message rédigé par l’IA</button>` : ''); };
+  const later = orders.filter((o) => o.status === STATUS.LIVRE && orderTotals(o).due > 0 && !plan.due.some((g) => g.items.some((x) => x.number === o.number)));
+  const v = view(`<p class="small muted" style="margin:0 0 10px">Relance ${S.remindAfter} jours après la livraison, puis tous les ${S.remindEvery} jours, ${S.remindMax} fois au maximum (Réglages). Un toucher ouvre WhatsApp avec le message prêt.</p>
+    ${S.remindOn === false ? '<div class="note" style="margin-bottom:12px">Les relances sont désactivées dans Réglages.</div>' : ''}
+    ${plan.due.length ? `<div class="note" style="margin-bottom:12px">🗓️ ${esc(P.momentRelance().txt)}</div>` : ''}
+    <div class="card rem">${plan.due.map(rowPlus).join('') || '<p class="muted" style="margin:0">Personne à relancer aujourd’hui. 👍</p>'}
+      ${plan.due.length > 1 ? `<button class="btn wa block" data-remind-all style="margin-top:10px">📲 Relancer tout le monde (${plan.due.length})</button>` : ''}</div>
+    ${plan.due[0] ? `<h2>Exemple de message</h2><div class="card small" style="white-space:pre-wrap">${esc(L.reminderMessage(plan.due[0], S))}</div>` : ''}
+    ${later.length ? `<h2>Autres impayés livrés (${later.length})</h2><div class="card calc">${later.map((o) => { const n = (o.reminders || []).length; return `<a class="l" href="#/order/${o.number}" style="color:inherit;text-decoration:none"><span>N°${o.number} · ${esc(o.clientName)}<br><span class="small muted">${n >= S.remindMax ? `${n} relances faites (maximum atteint)` : n ? `${n} relance(s), prochaine bientôt` : 'pas encore à relancer'}</span></span><span>${money(orderTotals(o).due)}</span></a>`; }).join('')}</div>` : ''}`);
+  bindReminders(v, plan, () => routes.reminders());
+  v.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-remia]'); if (!b) return;
+    const g = plan.due.find((x) => x.key === b.dataset.remia); if (!g) return;
+    busy(b, async () => {
+      const r = profil(g) || { jours: 0, label: '', score: 0 };
+      const txt = await ia('relance', { client: { nom: `${L.civility(g.sex)} ${g.name}`, doit: money(g.total), factures: g.items.map((x) => 'N°' + x.number).join(', '), jours_depuis_la_facture: r.jours, relances_deja_faites: g.count, profil: r.label }, ton: r.score >= 60 ? 'ferme mais respectueux' : 'amical', pressing: S.name, paiement: `espèces au pressing ou Mobile Money${S.phone ? ' (' + S.phone + ')' : ''}` });
+      const m = await ask({ title: `Relance de ${g.name}`, ok: '📲 Envoyer', body: `<textarea class="i" id="m-txt" rows="7">${esc(txt)}</textarea>` });
+      if (!m) return;
+      await L.markReminded(g); await waOpen(g.phone, $('#m-txt', m).value, S); routes.reminders();
+    });
+  });
+};
+
+routes.claims = async (_, q) => {
+  setNav('more');
+  setTop({ title: 'Réclamations', back: '#/more' });
+  const showAll = q.get('all') === '1';
+  const orders = await db.all('orders');
+  const rows = [];
+  for (const o of orders) for (const c of o.claims || []) if (showAll || c.status === 'open') rows.push({ o, c });
+  rows.sort((a, b) => b.c.createdAt.localeCompare(a.c.createdAt));
+  const v = view(`<div class="seg" style="margin-bottom:12px"><a class="${showAll ? '' : 'on'}" href="#/claims">À régler</a><a class="${showAll ? 'on' : ''}" href="#/claims?all=1">Toutes</a></div>
+    <p class="small muted" style="margin:0 0 10px">Pour signaler un problème : ouvrez la facture → « ⚠️ Réclamation ».</p>
+    ${rows.map(({ o, c }) => `<a class="small" href="#/order/${o.number}" style="display:block;margin:0 0 4px 4px">N°${o.number} · ${esc(o.clientName)} ›</a>${claimCard(o, c)}`).join('') || `<div class="empty">${showAll ? 'Aucune réclamation.' : 'Aucune réclamation à régler. 👍'}</div>`}`);
+  bindClaims(v, null, () => routes.claims(_, q));
+};
+
+routes.cousin = async () => {
+  if (needAdmin('cousin')) return;
+  setNav('more');
+  setTop({ title: 'Compte du cousin', back: '#/more' });
+  const pays = await L.getCousinPayments();
+  const sm = L.cousinSummary(await db.all('orders'), pays);
+  const v = view(`<div class="hero ${sm.left > 0 ? 'neg' : ''}"><span>Reste à payer au cousin</span><b>${money(sm.left)}</b>
+      <small>${L.kg(sm.kg)} lavés · tarif actuel ${money(S.cousinRate)}/kg</small></div>
+    <div class="kpis" style="margin-top:10px"><div class="kpi"><span>Total dû (lavages)</span><b>${money(sm.owed)}</b></div>
+      <div class="kpi"><span>Déjà payé</span><b>${money(sm.paid)}</b></div></div>
+    <div class="card stack" style="margin-top:12px"><b>Enregistrer un paiement au cousin</b>
+      <div class="grid2"><div><label class="f">Montant (F)</label><input class="i" id="k-amt" type="number" inputmode="numeric" placeholder="${Math.max(0, sm.left)}"></div>
+        <div><label class="f">Date</label><input class="i" id="k-date" type="date" value="${L.todayIso()}"></div></div>
+      <input class="i" id="k-note" placeholder="Note (ex. espèces, MoMo)">
+      <button class="btn primary block" id="k-save">Enregistrer le paiement</button>
+      <p class="small muted" style="margin:0">Ne le saisissez pas aussi dans Dépenses : le lavage est déjà compté dans le bilan à partir des factures.</p></div>
+    ${pays.length ? `<h2>Paiements faits</h2><div class="card calc">${pays.slice().reverse().map((p) => `<div class="l"><span>${fmtDate(p.date, false)}${p.note ? ' · ' + esc(p.note) : ''}</span><span>${money(p.amount)} <button class="btn sm danger" data-kdel="${p.id}" style="min-height:30px;padding:2px 8px">✕</button></span></div>`).join('')}</div>` : ''}
+    <h2>Commandes envoyées (${sm.sent.length})</h2>
+    <div class="card calc">${sm.sent.slice(0, 100).map((r) => `<a class="l" href="#/order/${r.o.number}" style="color:inherit;text-decoration:none"><span>${fmtDate(r.at, false)} · N°${r.o.number} · ${L.kg(r.kg)}</span><span>${money(r.amount)}</span></a>`).join('') || '<p class="muted small">Aucune commande envoyée au cousin.</p>'}</div>`);
+  $('#k-save', v).onclick = async () => {
+    try { await L.addCousinPayment($('#k-amt', v).value, $('#k-note', v).value, $('#k-date', v).value); toast('Paiement enregistré'); routes.cousin(); }
+    catch (e) { toast(e.message, true); }
+  };
+  $$('[data-kdel]', v).forEach((b) => { b.onclick = async () => {
+    if (!(await ask({ title: 'Supprimer ce paiement ?', ok: 'Supprimer', danger: true }))) return;
+    await L.deleteCousinPayment(Number(b.dataset.kdel)); routes.cousin();
+  }; });
+};
+
+// ---------------------------------------------------------------- MonPressing : caisse, assistant, détachage, IA
+const PROMO_IA = [];   // idées de promotions proposées par l'IA (le temps de la session)
+let CHAT = [];         // conversation avec l'assistant du patron
+
+routes.caisse = async () => {
+  setNav('more');
+  setTop({ title: 'Caisse du jour', back: '#/more' });
+  const orders = await db.all('orders');
+  const e = P.encaisseLe(orders, L.todayIso());
+  const list = (await P.clotures()).slice().reverse();
+  const deja = list.find((c) => c.date === L.todayIso());
+  const v = view(`<div class="card stack"><p style="margin:0">En fin de journée, comptez l’argent de la caisse <b>sans le fond de caisse</b> et notez ce qui est arrivé sur Mobile Money (d’après les SMS). L’appli compare avec les paiements enregistrés dans les factures.</p>
+      ${isAdmin() ? `<p class="small muted" style="margin:0">Enregistré aujourd’hui : <b>${money(e.total)}</b> (${e.n} paiement(s)).</p>` : ''}
+      ${deja ? `<div class="note">Déjà clôturée aujourd’hui à ${deja.at.slice(11, 16)}${isAdmin() ? ` : écart ${deja.ecart > 0 ? '+' : ''}${money(deja.ecart)}` : ''}. Vous pouvez recommencer.</div>` : ''}
+      <div class="grid2"><div><label class="f">Espèces comptées (F)</label><input class="i" id="k-esp" type="number" inputmode="numeric" min="0"></div>
+        <div><label class="f">Mobile Money reçu (F)</label><input class="i" id="k-momo" type="number" inputmode="numeric" min="0" placeholder="0"></div></div>
+      <input class="i" id="k-note" placeholder="Remarque (facultatif)">
+      <button class="btn primary big block" id="k-go">Clôturer la caisse</button></div>
+    ${isAdmin() && list.length ? `<h2>Dernières clôtures</h2><div class="card calc">${list.slice(0, 30).map((c) => `<div class="l"><span>${fmtDate(c.date, false)} · ${esc(c.qui || '')}<br><span class="small muted">compté ${money(c.especes + c.momo)} · enregistré ${money(c.attendu)}${c.note ? ' · ' + esc(c.note) : ''}</span></span><span style="color:${Math.abs(c.ecart) < 500 ? 'var(--green)' : 'var(--red)'};font-weight:700">${c.ecart > 0 ? '+' : ''}${money(c.ecart)}</span></div>`).join('')}</div>` : ''}`);
+  $('#k-go', v).onclick = (ev) => busy(ev.currentTarget, async () => {
+    if ($('#k-esp', v).value === '') throw new Error('Indiquez les espèces comptées.');
+    const c = await P.cloturer(orders, { especes: $('#k-esp', v).value, momo: $('#k-momo', v).value, note: $('#k-note', v).value, qui: S.adminPin && !unlocked ? 'employé' : 'admin' });
+    const ecart = Math.abs(c.ecart) >= 500;
+    toast(isAdmin() ? (ecart ? `Écart de ${c.ecart > 0 ? '+' : ''}${money(c.ecart)}` : 'Caisse juste 👍') : 'Clôture enregistrée, merci', isAdmin() && ecart);
+    routes.caisse();
+  });
+};
+
+routes.assistant = async () => {
+  if (needAdmin('assistant')) return;
+  setNav('more');
+  setTop({ title: 'Assistant du patron', back: '#/more' });
+  const orders = await db.all('orders'), expenses = await db.all('expenses');
+  const qs = ['Combien j’ai encaissé ce mois ?', 'Qui me doit le plus ?', 'Quelles commandes sont en retard ?', 'Combien chez le cousin ?', 'Mes dépenses du mois ?', 'Résumé de la semaine'];
+  const v = view(`<div class="chips">${qs.map((q) => `<a class="chip" data-q="${esc(q)}">${esc(q)}</a>`).join('')}</div>
+    <div class="card" id="as-chat" style="display:flex;flex-direction:column;gap:8px"></div>
+    <form id="as-form" class="row"><input class="i grow" id="as-q" placeholder="Votre question…" autocomplete="off"><button class="btn" type="button" id="as-mic" aria-label="Dicter">🎤</button><button class="btn navy">Demander</button></form>
+    ${iaPrete() ? '' : '<p class="small muted">Sans IA, je réponds aux questions courantes (argent, impayés, retards, cousin, dépenses, meilleurs clients). Pour toutes les autres : Plus › Intelligence artificielle.</p>'}`);
+  const draw = () => {
+    $('#as-chat', v).innerHTML = (CHAT.length ? CHAT : [{ t: 'Bonjour ! Posez-moi une question sur le pressing, à l’écrit ou au micro 🎤.', hello: true }]).map((m, i) => m.me
+      ? `<div class="bubble me">${esc(m.t)}</div>`
+      : `<div class="bubble">${esc(m.t)}${m.wait || m.hello ? '' : `<div class="row" style="gap:6px;margin-top:8px"><button class="btn sm ghost" data-say="${i}">🔊 Écouter</button><button class="btn sm wa" data-send="${i}">WhatsApp</button></div>`}</div>`).join('');
+  };
+  const poser = async (q) => {
+    q = String(q || '').trim(); if (!q) return;
+    CHAT.push({ me: true, t: q });
+    let rep = P.reponseLocale(q, orders, expenses);
+    if (!rep) {
+      if (iaPrete()) {
+        CHAT.push({ t: 'Je réfléchis…', wait: true }); draw();
+        try { rep = await ia('assistant', { question: q, donnees: P.donneesIA(orders, expenses, S) }); } catch (e) { rep = 'Je n’ai pas pu joindre l’IA : ' + e.message; }
+        CHAT = CHAT.filter((m) => !m.wait);
+      } else rep = 'Je ne sais pas encore répondre à cette question sans l’IA.';
+    }
+    CHAT.push({ t: rep }); draw(); window.scrollTo(0, document.body.scrollHeight);
+  };
+  v.onclick = (e) => {
+    const c = e.target.closest('[data-q]'); if (c) { poser(c.dataset.q); return; }
+    const s = e.target.closest('[data-say]'); if (s) { parler(CHAT[Number(s.dataset.say)].t); return; }
+    const w = e.target.closest('[data-send]'); if (w) waOpen(S.phone || '', CHAT[Number(w.dataset.send)].t, S);
+  };
+  $('#as-form', v).onsubmit = (e) => { e.preventDefault(); const q = $('#as-q', v).value; $('#as-q', v).value = ''; poser(q); };
+  $('#as-mic', v).onclick = (e) => busy(e.currentTarget, async () => { toast('Parlez maintenant…'); const t = await ecouter(); if (t) await poser(t); });
+  draw();
+};
+
+routes.detachage = async () => {
+  setNav('more');
+  setTop({ title: 'Conseils de détachage', back: '#/more' });
+  let photo = null;
+  const v = view(`<div class="card stack"><p style="margin:0">Photographiez la tache : ${iaPrete() ? 'l’IA dit ce que c’est et comment la traiter selon le tissu.' : 'avec l’IA (Plus › Intelligence artificielle), l’appli analyse la photo. Le guide plus bas marche sans internet.'}</p>
+      <label class="btn block">📷 Photo de la tache<input type="file" accept="image/*" capture="environment" id="d-photo" hidden></label>
+      <img id="d-img" class="photo-full hidden" alt="">
+      <div class="grid2"><div><label class="f">Tissu</label><select class="i" id="d-tissu">${['Inconnu', 'Coton', 'Wax / pagne', 'Bazin', 'Soie', 'Laine', 'Synthétique', 'Jean', 'Lin'].map((t) => `<option>${t}</option>`).join('')}</select></div>
+        <div><label class="f">Couleur</label><input class="i" id="d-coul" placeholder="ex. blanc, indigo"></div></div>
+      <input class="i" id="d-tache" placeholder="Tache supposée (facultatif)">
+      <button class="btn primary block" id="d-go">🔍 Analyser la tache</button></div>
+    <div id="d-res"></div>
+    <h2>Guide rapide (sans internet)</h2>
+    <div class="card">${P.GUIDE.map(([t, x]) => `<details class="guide"><summary>${esc(t)}</summary><p class="small">${esc(x)}</p></details>`).join('')}</div>`);
+  $('#d-photo', v).onchange = async (e) => { const f = e.target.files[0]; if (!f) return; photo = await L.resizeImage(f); const i = $('#d-img', v); i.src = photo; i.classList.remove('hidden'); };
+  $('#d-go', v).onclick = (e) => busy(e.currentTarget, async () => {
+    if (!photo) throw new Error('Prenez d’abord la photo de la tache.');
+    const r = await ia('detachage', { image: photo.split(',')[1], tissu: $('#d-tissu', v).value, couleur: $('#d-coul', v).value, tache: $('#d-tache', v).value });
+    $('#d-res', v).innerHTML = `<div class="card edge blue" style="white-space:pre-wrap">${esc(r)}</div>`;
+  });
+};
+
+routes.ia = async () => {
+  if (needAdmin('ia')) return;
+  setNav('more');
+  setTop({ title: 'Intelligence artificielle', back: '#/more' });
+  const v = view(`<div class="card stack"><p style="margin:0">L’IA reconnaît les vêtements en photo (taches, dégâts), comprend la facture dictée, rédige les relances, propose des promotions, répond à vos questions et conseille le détachage.</p>
+      <p class="small muted" style="margin:0">Il faut une clé API Claude : créez-la sur <b>console.anthropic.com</b> (menu API Keys) et ajoutez un peu de crédit. Chaque utilisation coûte quelques francs. La clé reste dans ce téléphone et n’est pas mise dans les sauvegardes.</p>
+      <div><label class="f">Clé API Claude</label><input class="i" id="ia-key" type="password" value="${esc(IA.key)}" placeholder="sk-ant-…" autocomplete="off" autocapitalize="off"></div>
+      <label class="check"><input type="checkbox" id="ia-on" ${IA.on !== false ? 'checked' : ''}> IA activée</label>
+      <div class="btns"><button class="btn primary" id="ia-save">Enregistrer</button><button class="btn" id="ia-test">Tester</button></div></div>
+    <div class="card small muted">Sans clé, tout le reste marche : la dictée, les idées de promotions, le profil des clients qui doivent, la date de rendu conseillée, la caisse et l’assistant répondent avec des règles simples.</div>`);
+  const save = async () => { IA = { key: $('#ia-key', v).value.trim(), on: $('#ia-on', v).checked }; await db.kv('ia', IA); };
+  $('#ia-save', v).onclick = async () => { await save(); toast('Réglage enregistré'); };
+  $('#ia-test', v).onclick = (e) => busy(e.currentTarget, async () => { await save(); const r = await ia('assistant', { question: 'Réponds seulement : « L’IA fonctionne. »', donnees: {} }); toast(r.slice(0, 90)); });
+};
+
+routes.more = async () => {
+  setNav('more');
+  setTop({ title: 'Plus' });
+  const lock = (t) => (S.adminPin && !unlocked ? `<span class="lock">🔒 ${t || ''}</span>` : '');
+  const v = view(`<div class="card menu">
+      <a href="#/ironing"><span class="ic">👕</span>Repassage</a>
+      <a href="#/clients"><span class="ic">👥</span>Clients</a>
+      <a href="#/promos"><span class="ic">🏷️</span>Promotions${lock()}</a>
+      <a href="#/claims"><span class="ic">⚠️</span>Réclamations</a>
+      <a href="#/reminders"><span class="ic">💬</span>Relances des impayés</a>
+      <a href="#/caisse"><span class="ic">💵</span>Caisse du jour</a>
+      <a href="#/assistant"><span class="ic">✨</span>Assistant du patron${lock()}</a>
+      <a href="#/detachage"><span class="ic">🧼</span>Conseils de détachage</a>
+      <a href="#/ia"><span class="ic">🤖</span>Intelligence artificielle${lock()}</a>
+      <a href="#/cousin"><span class="ic">🧺</span>Compte du cousin${lock()}</a>
+      <a href="#/orders?s=all"><span class="ic">🧾</span>Toutes les factures</a>
+      <a href="#/bilan"><span class="ic">📊</span>Bilan${lock()}</a>
+      <a href="#/expenses"><span class="ic">💸</span>Dépenses${lock()}</a>
+      <a href="#/settings"><span class="ic">⚙️</span>Réglages et tarifs${lock()}</a>
+      <a href="#/backup"><span class="ic">💾</span>Sauvegarde des données</a>
+    </div>
+    ${S.adminPin ? `<button class="btn ${unlocked ? 'ghost' : 'navy'} block" id="m-lock">${unlocked ? 'Verrouiller le mode admin' : 'Déverrouiller le mode admin'}</button>` : ''}
+    <p class="small muted" style="text-align:center;margin-top:20px">MonPressing · données stockées dans ce téléphone${isNative ? '' : ' (navigateur)'}</p>`);
+  if ($('#m-lock', v)) $('#m-lock', v).onclick = () => { if (unlocked) { unlocked = false; toast('Verrouillé'); routes.more(); } else location.hash = '#/unlock?next=more'; };
+};
+
+routes.unlock = async (_, q) => {
+  setNav('none');
+  setTop({ title: 'Mode admin', back: '#/home' });
+  const v = view(`<div class="card stack" style="margin-top:20px"><p class="muted" style="margin:0">Entrez le code administrateur.</p>
+    <form id="u-form" class="stack"><input class="i pin" id="u-pin" type="password" inputmode="numeric" autocomplete="off">
+    <button class="btn primary big block">Déverrouiller</button></form></div>`);
+  $('#u-pin', v).focus();
+  $('#u-form', v).onsubmit = (e) => {
+    e.preventDefault();
+    if ($('#u-pin', v).value === S.adminPin) { unlocked = true; toast('Mode admin ouvert'); location.hash = '#/' + (q.get('next') || 'home'); }
+    else { toast('Code incorrect', true); $('#u-pin', v).value = ''; }
+  };
+};
+
+function needAdmin(name) {
+  if (isAdmin()) return false;
+  location.hash = '#/unlock?next=' + name;
+  return true;
+}
+
+routes.bilan = async (_, q) => {
+  if (needAdmin('bilan')) return;
+  setNav('more');
+  setTop({ title: 'Bilan', back: '#/more', right: '<button class="pill" id="b-export">⇩ Exporter</button>' });
+  const kind = ['month', 'half', 'year'].includes(q.get('k')) ? q.get('k') : 'month';
+  const off = Number(q.get('o') || 0);
+  const p = L.period(kind, off);
+  const [orders, expenses] = [await db.all('orders'), await db.all('expenses')];
+  const b = L.computeBilan(orders, expenses, p, S);
+  const today = L.todayIso();
+  const fm = (n) => money(n);
+
+  // Graphique principal
+  let main;
+  if (kind === 'month') {
+    const days = L.daysBetween(p.start, p.end);
+    main = `<h3 class="ch-title">Chiffre d'affaires par jour</h3>` + Charts.barChart({
+      labels: days.map((d) => String(Number(d.slice(8)))), tips: days.map((d) => fmtDate(d, false)),
+      series: [{ name: "Chiffre d'affaires", color: Charts.C.ca, values: days.map((d) => b.byDay[d] || 0) }],
+      fmt: fm, highlight: days.indexOf(today), every: 5,
+    });
+  } else {
+    const months = L.monthsBetween(p.start, p.end);
+    const mm = months.map((m) => b.byMonth[m] || { ca: 0, wash: 0, exp: 0, inv: 0 });
+    const lab = months.map((m) => L.monthShort(Number(m.slice(5)) - 1));
+    const tips = months.map((m) => L.monthName(Number(m.slice(5)) - 1) + ' ' + m.slice(0, 4));
+    main = `<h3 class="ch-title">Recettes et charges par mois</h3>` + Charts.barChart({
+      labels: lab, tips, fmt: fm,
+      series: [
+        { name: "Chiffre d'affaires", color: Charts.C.ca, values: mm.map((r) => r.ca) },
+        { name: 'Lavage cousin', color: Charts.C.wash, values: mm.map((r) => r.wash) },
+        { name: 'Dépenses', color: Charts.C.exp, values: mm.map((r) => r.exp + r.inv) },
+      ],
+    }) + `<h3 class="ch-title" style="margin-top:18px">Bénéfice net par mois</h3>` + Charts.barChart({
+      labels: lab, tips, fmt: fm, height: 150,
+      series: [{ name: 'Bénéfice net', color: Charts.C.pos, colorFn: (v) => (v < 0 ? Charts.C.neg : Charts.C.pos), values: mm.map((r) => r.ca - r.wash - r.exp) }],
+    });
+  }
+
+  const split = Charts.splitBar([
+    { name: 'Lavage cousin', value: b.wash, color: Charts.C.wash },
+    { name: 'Dépenses courantes', value: b.current, color: Charts.C.exp },
+    { name: 'Bénéfice net', value: Math.max(0, b.net), color: Charts.C.pos },
+  ], fm);
+  const cats = Object.entries(b.expByCat).sort((a, c) => c[1] - a[1]).map(([k, v]) => [L.catLabel(k), v]);
+  const prevP = L.period(kind, off - 1);
+  const prev = L.computeBilan(orders, expenses, prevP, S);
+  const delta = (cur, old) => {
+    if (!old) return '';
+    const d = Math.round(((cur - old) / Math.abs(old)) * 100);
+    return `<em class="${d >= 0 ? 'up' : 'down'}">${d >= 0 ? '▲' : '▼'} ${Math.abs(d)} %</em>`;
+  };
+
+  const v = view(`<div class="seg">${[['month', 'Mois'], ['half', '6 mois'], ['year', 'Année']].map(([k, l]) => `<a class="${k === kind ? 'on' : ''}" href="#/bilan?k=${k}">${l}</a>`).join('')}</div>
+    <div class="periodnav"><button data-o="${off - 1}" aria-label="Précédent">‹</button><div class="lbl">${p.label}</div><button data-o="${off + 1}" ${off >= 0 ? 'disabled style="opacity:.3"' : ''} aria-label="Suivant">›</button></div>
+    <div class="hero ${b.net < 0 ? 'neg' : ''}"><span>Bénéfice net</span><b>${money(b.net)}</b>
+      <small>${b.orders} commande(s) · CA ${money(b.ca)} ${delta(b.ca, prev.ca)}</small></div>
+    <div class="kpis" style="margin-top:10px">
+      <div class="kpi"><span>Chiffre d'affaires</span><b>${money(b.ca)}</b>${delta(b.ca, prev.ca)}</div>
+      <div class="kpi"><span>Marge après lavage</span><b>${money(b.margin)}</b>${delta(b.margin, prev.margin)}</div>
+      <div class="kpi"><span>Encaissé</span><b>${money(b.cashed)}</b></div>
+      <div class="kpi"><span>Impayés</span><b style="color:${b.unpaid ? 'var(--red)' : 'inherit'}">${money(b.unpaid)}</b></div></div>
+    <p class="small muted" style="margin:6px 2px 0">Les pourcentages comparent à la période précédente (${prevP.label}). Touchez un graphique pour voir les valeurs.</p>
+    <div class="card" style="margin-top:12px">${main}</div>
+    <div class="card"><h3 class="ch-title">Où va le chiffre d'affaires</h3>${split}${b.net < 0 ? `<p class="small" style="color:var(--red);margin:8px 0 0;font-weight:600">Les charges dépassent le chiffre d'affaires de ${money(-b.net)}.</p>` : ''}</div>
+    ${b.washRatio > 0.35 ? `<div class="alert" style="margin-bottom:12px">Le lavage représente ${Math.round(b.washRatio * 100)} % du CA (alerte au-dessus de 35 %). Vérifiez les prix ou le poids.</div>` : ''}
+    <div class="card calc">
+      <h3 class="ch-title">Compte de résultat</h3>
+      <div class="l"><span>Chiffre d'affaires (${b.orders} commandes)</span><span>${money(b.ca)}</span></div>
+      <div class="l"><span>− Lavage chez le cousin (${L.kg(b.washKg)})</span><span>− ${money(b.wash)}</span></div>
+      <div class="l sum"><span>= Marge après lavage</span><span>${money(b.margin)}</span></div>
+      <div class="l"><span>− Dépenses courantes</span><span>− ${money(b.current)}</span></div>
+      <div class="l net ${b.net < 0 ? 'neg' : ''}"><span>BÉNÉFICE NET</span><span>${money(b.net)}</span></div>
+      <div class="l"><span>− Investissements</span><span>− ${money(b.invest)}</span></div>
+      <div class="l sum"><span>Net après investissements</span><span>${money(b.netAfterInvest)}</span></div>
+    </div>
+    <div class="kpis"><div class="kpi"><span>À payer au cousin</span><b>${money(b.wash)}</b><span>${L.kg(b.washKg)} lavés</span></div>
+      <div class="kpi"><span>À mettre de côté (${S.savingsPercent} %)</span><b>${money(b.savings)}</b><span>Lavage/CA ${Math.round(b.washRatio * 100)} %</span></div></div>
+    ${cats.length ? `<div class="card" style="margin-top:12px"><h3 class="ch-title">Dépenses par catégorie</h3>${Charts.hbars(cats, fm, Charts.C.exp)}</div>` : ''}
+    <div class="card" style="margin-top:12px"><h3 class="ch-title">Articles les plus lavés</h3>
+      ${Charts.hbars(b.topArticles, (n) => n + ' pcs') || '<p class="muted small">Aucune commande sur la période.</p>'}</div>
+    <div class="btns"><button class="btn navy" id="b-pdf">⇩ Bilan en PDF</button><button class="btn green" id="b-xlsx">⇩ Bilan en Excel</button></div>
+    <a class="btn block ghost" href="#/expenses" style="margin-top:8px">Voir et saisir les dépenses →</a>`);
+  Charts.enableTips(v);
+  $$('[data-o]', v).forEach((btn) => { btn.onclick = () => { if (!btn.disabled) location.hash = `#/bilan?k=${kind}&o=${btn.dataset.o}`; }; });
+  const doExport = async (fmt, btn) => busy(btn, async () => {
+    const blob = fmt === 'pdf' ? bilanPdf(b, p, S) : bilanXlsx(b, p, S);
+    const name = bilanFileName(p, fmt);
+    const r = await shareFile(blob, name, 'Bilan ' + p.label);
+    if (r === 'downloaded') toast('Fichier enregistré : ' + name);
+  });
+  $('#b-pdf', v).onclick = (e) => doExport('pdf', e.currentTarget);
+  $('#b-xlsx', v).onclick = (e) => doExport('xlsx', e.currentTarget);
+  $('#b-export').onclick = async () => {
+    const m = await ask({ title: 'Exporter le bilan', ok: 'Exporter',
+      body: `<p>${esc(p.label)}</p><div class="seg" style="margin-bottom:6px"><a class="on" data-f="pdf">PDF</a><a data-f="xlsx">Excel</a></div>
+        <p class="small muted" style="margin-top:8px">Changez de période (Mois, 6 mois, Année et flèches) avant d'exporter.</p>` ,
+      onOpen: (bg) => { bg.querySelectorAll('[data-f]').forEach((a) => { a.onclick = () => { bg.querySelectorAll('[data-f]').forEach((x) => x.classList.toggle('on', x === a)); }; }); } });
+    if (!m) return;
+    const f = m.querySelector('[data-f].on').dataset.f;
+    doExport(f, $('#b-export'));
+  };
+};
+
+routes.expenses = async (_, q) => {
+  if (needAdmin('expenses')) return;
+  setNav('more');
+  setTop({ title: 'Dépenses', back: '#/more' });
+  const off = Number(q.get('o') || 0);
+  const p = L.period('month', off);
+  const all = await L.allExpenses();
+  const list = all.filter((e) => e.date >= p.start && e.date <= p.end);
+  const editing = q.get('edit') ? all.find((e) => e.id === Number(q.get('edit'))) : null;
+  const total = list.reduce((s, e) => s + e.amount, 0);
+  const byCat = {};
+  for (const e of list) byCat[e.category] = (byCat[e.category] || 0) + e.amount;
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const maxC = Math.max(1, ...cats.map((c) => c[1]));
+  const today = L.todayIso();
+  const defDate = editing ? editing.date : (today >= p.start && today <= p.end ? today : p.start);
+  const v = view(`<div class="periodnav"><button data-o="${off - 1}">‹</button><div class="lbl">${p.label}</div><button data-o="${off + 1}">›</button></div>
+    <div class="card stack"><b>${editing ? 'Modifier la dépense' : 'Nouvelle dépense'}</b>
+      <div class="grid2"><div><label class="f">Date</label><input class="i" type="date" id="e-date" value="${defDate}"></div>
+        <div><label class="f">Montant (F)</label><input class="i" type="number" inputmode="numeric" id="e-amount" min="0" value="${editing ? editing.amount : ''}"></div></div>
+      <div><label class="f">Catégorie</label><select class="i" id="e-cat">${L.EXPENSE_CATEGORIES.map((c) => `<option value="${c.key}" ${editing && editing.category === c.key ? 'selected' : ''}>${c.label}</option>`).join('')}</select></div>
+      <div><label class="f">Détail</label><input class="i" id="e-label" placeholder="ex. carburant moto" value="${esc(editing ? editing.label : '')}"></div>
+      <button class="btn primary block" id="e-save">${editing ? 'Enregistrer' : 'Ajouter la dépense'}</button>
+      ${editing ? `<a class="btn ghost block" href="#/expenses?o=${off}">Annuler</a>` : ''}
+    </div>
+    <div class="kpis"><div class="kpi"><span>Total du mois</span><b>${money(total)}</b></div><a class="kpi" href="#/bilan?k=month&o=${off}" style="text-decoration:none;color:var(--blue)"><span>Bénéfice net</span><b>Voir →</b></a></div>
+    ${cats.length ? `<div class="card" style="margin-top:12px"><b class="small muted">Par catégorie</b>${cats.map(([k, a]) => `<div class="hbar"><span class="lbl">${esc(L.catLabel(k))}</span><span class="track"><i style="width:${(a / maxC) * 100}%;${L.catInvest(k) ? 'background:var(--orange)' : ''}"></i></span><b>${money(a)}</b></div>`).join('')}</div>` : ''}
+    <div id="e-list" style="margin-top:12px">${list.map((e) => `<div class="card row"><div class="grow"><b>${esc(L.catLabel(e.category))}</b> · ${fmtDate(e.date, false).slice(0, 5)}<div class="small muted">${esc(e.label)}</div></div>
+      <b>${money(e.amount)}</b><a class="btn sm" href="#/expenses?o=${off}&edit=${e.id}">✎</a><button class="btn sm danger" data-del="${e.id}">✕</button></div>`).join('') || '<div class="empty">Aucune dépense ce mois-ci.</div>'}</div>`);
+  $$('[data-o]', v).forEach((b) => { b.onclick = () => { location.hash = `#/expenses?o=${b.dataset.o}`; }; });
+  $('#e-save', v).onclick = async () => {
+    const amount = Math.round(Number($('#e-amount', v).value));
+    if (!amount || amount <= 0) { toast('Indiquez un montant', true); return; }
+    const rec = { date: $('#e-date', v).value || today, amount, category: $('#e-cat', v).value, label: $('#e-label', v).value.trim(), createdAt: editing ? editing.createdAt : L.nowIso() };
+    if (editing) rec.id = editing.id;
+    await db.put('expenses', rec);
+    toast(editing ? 'Dépense modifiée' : 'Dépense ajoutée');
+    location.hash = `#/expenses?o=${off}&t=${Date.now()}`;
+  };
+  $('#e-list', v).onclick = async (e) => {
+    const b = e.target.closest('[data-del]'); if (!b) return;
+    if (!(await ask({ title: 'Supprimer cette dépense ?', ok: 'Supprimer', danger: true }))) return;
+    await db.del('expenses', Number(b.dataset.del)); toast('Supprimée'); routes.expenses(_, q);
+  };
+};
+
+routes.settings = async () => {
+  if (needAdmin('settings')) return;
+  setNav('more');
+  setTop({ title: 'Réglages', back: '#/more' });
+  const arts = await L.getArticles();
+  const v = view(`<div class="card stack"><b>Le pressing</b>
+      <div class="row">${S.logo ? `<img src="${S.logo}" style="width:110px;height:68px;border-radius:12px;object-fit:contain;background:#fff;border:1px solid var(--line)">` : '<div class="thumb" style="width:64px;height:64px;border-radius:12px;background:var(--bg);display:grid;place-items:center" >logo</div>'}
+        <label class="btn sm">Choisir le logo<input type="file" accept="image/*" id="s-logo" hidden></label>${S.logo ? '<button class="btn sm ghost" id="s-nologo">Retirer</button>' : ''}</div>
+      <div><label class="f">Nom</label><input class="i" id="s-name" value="${esc(S.name)}"></div>
+      <div class="grid2"><div><label class="f">Ville</label><input class="i" id="s-city" value="${esc(S.city)}"></div>
+        <div><label class="f">Téléphone</label><input class="i" id="s-phone" type="tel" value="${esc(S.phone)}"></div></div>
+      <div class="grid2"><div><label class="f">Tarif du cousin (F/kg)</label><input class="i" id="s-rate" type="number" value="${S.cousinRate}"></div>
+        <div><label class="f">Frais de livraison (F)</label><input class="i" id="s-deliv" type="number" value="${S.deliveryFee}"></div></div>
+      <div class="grid2"><div><label class="f">% mis de côté</label><input class="i" id="s-sav" type="number" value="${S.savingsPercent}"></div>
+        <div><label class="f">Premier N° de facture</label><input class="i" id="s-start" type="number" value="${S.invoiceStart}"></div></div>
+      <div class="grid2"><div><label class="f">Délai de rendu (jours)</label><input class="i" id="s-due" type="number" min="0" value="${S.dueDays}"></div><div></div></div>
+      <label class="check"><input type="checkbox" id="s-mr" ${S.monthlyReport !== false ? 'checked' : ''}> 📊 Bilan mensuel automatique (le 1er du mois${isNative ? ', avec notification à 9 h' : ''})</label>
+      <b style="margin-top:6px">💬 Relances des impayés</b>
+      <label class="check"><input type="checkbox" id="s-rem" ${S.remindOn !== false ? 'checked' : ''}> Proposer les relances WhatsApp</label>
+      <div class="grid2"><div><label class="f">1re relance après (jours, depuis la livraison)</label><input class="i" id="s-rafter" type="number" min="1" value="${S.remindAfter}"></div>
+        <div><label class="f">Puis tous les (jours)</label><input class="i" id="s-revery" type="number" min="1" value="${S.remindEvery}"></div></div>
+      <div class="grid2"><div><label class="f">Nombre maximum de relances</label><input class="i" id="s-rmax" type="number" min="1" value="${S.remindMax}"></div>
+        <div><label class="f">Heure de la notification</label><input class="i" id="s-rhour" type="number" min="6" max="21" value="${S.remindHour}"></div></div>
+      <a class="btn ghost block" href="#/promos">🏷️ Gérer les promotions (remises, 10 % dès 5 000 F…)</a>
+      <b style="margin-top:6px">💬 WhatsApp</b>
+      <div class="grid2"><div><label class="f">Envoyer avec</label><select class="i" id="s-waapp"><option value="business" ${S.waApp !== 'normal' ? 'selected' : ''}>WhatsApp Business</option><option value="normal" ${S.waApp === 'normal' ? 'selected' : ''}>WhatsApp</option></select></div>
+        <div><label class="f">Numéro WhatsApp du pressing</label><input class="i" id="s-wanum" type="tel" value="${esc(S.waBusinessPhone || '')}"></div></div>
+      <p class="small muted" style="margin:0">Les messages partent du WhatsApp installé sur ce téléphone : installez-y WhatsApp Business avec ce numéro.</p>
+      <b style="margin-top:6px">🎁 Fidélité</b>
+      <div class="grid2"><div><label class="f">Récompense toutes les … commandes (0 = désactivé)</label><input class="i" id="s-lev" type="number" min="0" value="${S.loyaltyEvery}"></div>
+        <div><label class="f">Récompense</label><div class="row"><input class="i grow" id="s-lval" type="number" min="0" value="${S.loyaltyValue}"><select class="i" id="s-ltype" style="width:auto"><option value="percent" ${S.loyaltyType !== 'amount' ? 'selected' : ''}>%</option><option value="amount" ${S.loyaltyType === 'amount' ? 'selected' : ''}>F</option></select></div></div></div>
+      <p class="small muted" style="margin:0">Ex. 10 commandes et 100 % = la 10e commande est offerte ; 5 et 20 % = 20 % de remise toutes les 5 commandes.</p>
+      <div><label class="f">Code administrateur (protège bilan, dépenses, réglages, marges). Vide = pas de code.</label><input class="i" id="s-pin" inputmode="numeric" value="${esc(S.adminPin)}" placeholder="ex. 2580"></div>
+      <button class="btn primary block" id="s-save">Enregistrer les réglages</button></div>
+    <h2>Grille d'articles</h2>
+    <p class="small muted" style="margin-top:0">Les anciennes factures gardent leurs prix : changer un tarif ne les modifie pas.</p>
+    <div id="a-list">${arts.map((a, i) => `<div class="card stack" data-id="${a.id}">
+        <div class="row"><input class="i grow" data-f="name" value="${esc(a.name)}"><button class="btn sm ghost" data-mv="-1" ${i === 0 ? 'disabled' : ''}>↑</button><button class="btn sm ghost" data-mv="1" ${i === arts.length - 1 ? 'disabled' : ''}>↓</button></div>
+        <div class="grid2"><div><label class="f">Prix (F)</label><input class="i" type="number" data-f="price" value="${a.price}"></div>
+          <div><label class="f">Poids (kg)</label><input class="i" type="number" step="0.05" data-f="weight" value="${a.weight}"></div></div>
+        <div class="row between"><label class="check"><input type="checkbox" data-f="homeWash" ${a.homeWash ? 'checked' : ''}> Lavage maison</label>
+          <label class="check"><input type="checkbox" data-f="active" ${a.active ? 'checked' : ''}> Actif</label>
+          <button class="btn sm danger" data-adel>✕</button></div></div>`).join('')}</div>
+    <div class="btns"><button class="btn" id="a-add">+ Ajouter un article</button><button class="btn primary" id="a-save">Enregistrer la grille</button></div>`);
+  $('#s-logo', v).onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    S.logo = await L.resizeImage(f, 600, 0.88); await db.kv('logoRemoved', false); await L.saveSettings(S); toast('Logo enregistré'); routes.settings();
+  };
+  if ($('#s-nologo', v)) $('#s-nologo', v).onclick = async () => { S.logo = ''; await db.kv('logoRemoved', true); await L.saveSettings(S); routes.settings(); };
+  $('#s-save', v).onclick = async () => {
+    const pin = $('#s-pin', v).value.trim();
+    if (pin && pin.length < 4) { toast('Le code doit avoir au moins 4 chiffres', true); return; }
+    Object.assign(S, {
+      name: $('#s-name', v).value.trim() || 'MonPressing', city: $('#s-city', v).value.trim(), phone: $('#s-phone', v).value.trim(),
+      cousinRate: Number($('#s-rate', v).value) || 0, deliveryFee: Number($('#s-deliv', v).value) || 0,
+      savingsPercent: Number($('#s-sav', v).value) || 0, invoiceStart: Number($('#s-start', v).value) || 1, adminPin: pin,
+      dueDays: Math.max(0, Number($('#s-due', v).value) || 0), loyaltyEvery: Math.max(0, Number($('#s-lev', v).value) || 0),
+      loyaltyValue: Math.max(0, Number($('#s-lval', v).value) || 0), loyaltyType: $('#s-ltype', v).value,
+      monthlyReport: $('#s-mr', v).checked,
+      waApp: $('#s-waapp', v).value, waBusinessPhone: $('#s-wanum', v).value.trim(),
+      remindOn: $('#s-rem', v).checked, remindAfter: Math.max(1, Number($('#s-rafter', v).value) || 7), remindEvery: Math.max(1, Number($('#s-revery', v).value) || 7),
+      remindMax: Math.max(1, Number($('#s-rmax', v).value) || 3), remindHour: Math.min(21, Math.max(6, Number($('#s-rhour', v).value) || 10)),
+    });
+    if (pin) unlocked = true;
+    await L.saveSettings(S); toast('Réglages enregistrés');
+    scheduleMonthlyReminder(S.monthlyReport !== false);
+  };
+  const collect = () => $$('#a-list [data-id]', v).map((card, i) => ({
+    id: Number(card.dataset.id), position: i,
+    name: $('[data-f=name]', card).value.trim(), price: Number($('[data-f=price]', card).value) || 0,
+    weight: Number($('[data-f=weight]', card).value) || 0, homeWash: $('[data-f=homeWash]', card).checked, active: $('[data-f=active]', card).checked,
+  }));
+  const saveGrid = async () => { for (const a of collect()) { if (a.name) await db.put('articles', a); } };
+  $('#a-list', v).onclick = async (e) => {
+    const card = e.target.closest('[data-id]'); if (!card) return;
+    if (e.target.closest('[data-adel]')) {
+      if (!(await ask({ title: 'Supprimer cet article ?', text: 'Les anciennes factures ne changent pas. Vous pouvez aussi simplement le décocher « Actif ».', ok: 'Supprimer', danger: true }))) return;
+      await saveGrid(); await db.del('articles', Number(card.dataset.id)); routes.settings(); return;
+    }
+    const mv = e.target.closest('[data-mv]');
+    if (mv) {
+      const d = Number(mv.dataset.mv);
+      if (d < 0 && card.previousElementSibling) card.parentNode.insertBefore(card, card.previousElementSibling);
+      if (d > 0 && card.nextElementSibling) card.parentNode.insertBefore(card.nextElementSibling, card);
+      await saveGrid(); routes.settings();
+    }
+  };
+  $('#a-add', v).onclick = async () => {
+    await saveGrid();
+    await db.put('articles', { name: 'Nouvel article', price: 500, weight: 0.3, homeWash: false, active: true, position: arts.length });
+    await routes.settings(); window.scrollTo(0, document.body.scrollHeight);
+  };
+  $('#a-save', v).onclick = async () => { await saveGrid(); toast('Grille enregistrée'); };
+};
+
+async function restoreFrom(file) {
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (e) { toast('Fichier illisible', true); return; }
+  const n = (data.orders || []).length;
+  if (!(await ask({ title: 'Restaurer cette sauvegarde ?', text: `Du ${fmtDate(data.exportedAt)} : ${n} facture(s), ${(data.expenses || []).length} dépense(s). Les données actuelles de ce téléphone seront remplacées.`, ok: 'Restaurer', danger: true }))) return;
+  try { await L.importAll(data); toast('Sauvegarde restaurée'); location.hash = '#/home'; await boot(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// ---------------------------------------------------------------- sauvegarde en ligne
+function cloudForm(c) {
+  return `<div><label class="f">Adresse du projet Supabase</label><input class="i" id="cl-url" placeholder="https://xxxx.supabase.co" value="${esc(c.url)}" autocomplete="off" autocapitalize="off"></div>
+    <div><label class="f">Clé « anon public »</label><input class="i" id="cl-key" placeholder="eyJhbGciOi…" value="${esc(c.key)}" autocomplete="off" autocapitalize="off"></div>
+    <div><label class="f">Mot de passe des sauvegardes (6 caractères min.) — notez-le bien !</label><input class="i" id="cl-pass" type="password" value="${esc(c.password)}" autocomplete="off"></div>`;
+}
+function readCloudForm(root, prev = {}) {
+  return { ...prev, url: Cloud.normalizeUrl($('#cl-url', root).value), key: $('#cl-key', root).value.trim().replace(/\s+/g, ''), password: $('#cl-pass', root).value };
+}
+async function pickAndRestore(c, after) {
+  let list;
+  try { list = await Cloud.listBackups(c); } catch (e) { toast(e.message, true); return; }
+  if (!list.length) { toast('Aucune sauvegarde en ligne trouvée.', true); return; }
+  const m = await ask({ title: 'Restaurer depuis internet', ok: 'Restaurer', danger: true,
+    body: `<label class="f">Sauvegarde</label><select class="i" id="m-file">${list.map((f) => `<option value="${f.name}">${fmtDate(f.date, false)}${f.size ? ` · ${Math.round(f.size / 1024)} Ko` : ''}</option>`).join('')}</select>
+      <p class="small muted" style="margin-top:8px">Les données actuelles de ce téléphone seront remplacées.</p>` });
+  if (!m) return;
+  try { await Cloud.restoreFromCloud(c, $('#m-file', m).value, c.password); toast('Données restaurées'); after && after(); }
+  catch (e) { toast(e.message, true); }
+}
+
+routes.cloud = async () => {
+  setNav('none');
+  setTop({ title: 'Restaurer depuis internet', back: '#/welcome' });
+  const v = view(`<div class="card stack"><p style="margin:0">Entrez les informations de votre sauvegarde en ligne (les mêmes que sur l'ancien téléphone).</p>
+    ${cloudForm({ url: '', key: '', password: '' })}
+    <button class="btn primary big block" id="cl-go">Voir mes sauvegardes</button></div>`);
+  $('#cl-go', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const c = { ...readCloudForm(v), enabled: true };
+    await pickAndRestore(c, async () => { await Cloud.setCloud(c); location.hash = '#/home'; await boot(); });
+  });
+};
+
+routes.backup = async () => {
+  setNav('more');
+  setTop({ title: 'Sauvegarde', back: '#/more' });
+  const last = await db.kv('lastBackup');
+  const cloud = await Cloud.getCloud();
+  const cloudLast = (await db.kv('cloudLast')) || {};
+  const cloudOk = await db.kv('cloudLastOk');
+  const [no, ne, np] = [await db.count('orders'), await db.count('expenses'), await db.count('photos')];
+  const v = view(`<div class="card stack">
+      <p style="margin:0">Toutes les données sont <b>uniquement dans ce téléphone</b>. S'il est perdu, cassé ou si l'appli est désinstallée, elles disparaissent.
+      Faites une sauvegarde chaque semaine et envoyez-la ailleurs (WhatsApp à vous-même, Google Drive, e-mail).</p>
+      <p class="small muted" style="margin:0">Contenu : ${no} facture(s), ${ne} dépense(s), ${np} photo(s).<br>Dernière sauvegarde : <b>${last ? fmtDate(last) : 'jamais'}</b></p>
+      <button class="btn primary big block" id="b-share">Créer et envoyer la sauvegarde</button>
+      <button class="btn block" id="b-save">Enregistrer dans le téléphone</button>
+    </div>
+    <div class="card stack" id="b-cloud"><b>☁️ Sauvegarde automatique en ligne</b>
+      ${cloud.enabled ? `<p style="margin:0">✅ Activée : chaque soir à partir de 19 h, dès que l'appli est ouverte avec internet.</p>` : `<p style="margin:0" class="small">Chaque soir, la sauvegarde part toute seule sur internet (Supabase, gratuit), chiffrée avec votre mot de passe. Si le téléphone est perdu, tout se récupère sur un nouveau.</p>`}
+      ${cloudLast.at ? `<p class="small ${cloudLast.ok === false ? '' : 'muted'}" style="margin:0;${cloudLast.ok === false ? 'color:var(--red)' : ''}">${cloudLast.ok === false ? `⚠️ Échec le ${fmtDate(cloudLast.at)} : ${esc(cloudLast.error || '')}` : `Dernier envoi : ${fmtDate(cloudLast.at)}`}${cloudOk && cloudLast.ok === false ? ` · dernier envoi réussi : ${fmtDate(cloudOk)}` : ''}</p>` : ''}
+      ${cloud.enabled ? `<div class="btns"><button class="btn green" id="cl-now">Envoyer maintenant</button><button class="btn" id="cl-restore">Restaurer…</button></div>
+        <details><summary class="small muted">Modifier la configuration</summary><div class="stack" style="margin-top:10px">${cloudForm(cloud)}
+        <div class="btns"><button class="btn primary" id="cl-save">Enregistrer</button><button class="btn danger" id="cl-off">Désactiver</button></div></div></details>`
+      : `${isAdmin() ? `${cloudForm(cloud)}<button class="btn primary block" id="cl-save">Tester et activer</button>
+        <details class="guide"><summary>Comment faire ? (une seule fois, 5 minutes)</summary><ol>
+          <li>Sur <b>supabase.com</b>, créez un compte gratuit puis <b>New project</b> (nom : pressing ; région : Europe).</li>
+          <li>Menu <b>SQL Editor</b> → collez le code ci-dessous → <b>Run</b> : il crée le dossier <code>saves</code> (privé) et ses règles d'accès.<br><button class="btn sm" id="cl-sql" type="button">Copier le code</button></li>
+          <li>Menu <b>Project Settings → API Keys</b> : copiez l'<b>adresse du projet</b> (Project URL) et la clé <b>anon public</b> (ou <b>publishable</b>).</li>
+          <li>Collez-les ici, choisissez un mot de passe, puis <b>Tester et activer</b>.</li></ol>
+          <p class="small muted">Gardez le mot de passe et ces informations sur papier : ils seront demandés pour restaurer sur un nouveau téléphone.</p></details>` : '<p class="small muted" style="margin:0">Déverrouillez le mode admin pour l’activer.</p>'}`}
+    </div>
+    <div class="card stack"><b>Restaurer</b>
+      <p class="small muted" style="margin:0">Pour un nouveau téléphone : installez l'appli, puis choisissez le fichier de sauvegarde (.json).</p>
+      <label class="btn ghost block">Choisir un fichier de sauvegarde<input type="file" accept=".json,application/json,text/plain" id="b-file" hidden></label></div>`);
+  const make = async () => {
+    const data = await L.exportAll();
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    const name = `MonPressing-sauvegarde-${L.nowIso().slice(0, 16).replace(/[T:]/g, '-')}.json`;
+    return { blob, name };
+  };
+  $('#b-share', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const { blob, name } = await make();
+    const r = await shareFile(blob, name, 'Sauvegarde MonPressing');
+    if (r !== 'cancelled') { await db.kv('lastBackup', L.nowIso()); toast('Sauvegarde créée'); routes.backup(); }
+  });
+  $('#b-save', v).onclick = (e) => busy(e.currentTarget, async () => {
+    const { blob, name } = await make();
+    const where = await saveFile(blob, name);
+    await db.kv('lastBackup', L.nowIso());
+    toast(where ? 'Enregistré : ' + where : 'Sauvegarde créée'); routes.backup();
+  });
+  $('#b-file', v).onchange = (e) => restoreFrom(e.target.files[0]);
+  if ($('#cl-save', v)) $('#cl-save', v).onclick = (e) => busy(e.currentTarget, async () => {
+    if (needAdmin('backup')) return;
+    const c = readCloudForm(v, cloud);
+    if (!/^(https:\/\/|http:\/\/localhost)/.test(c.url) || !c.key) throw new Error('Adresse ou clé manquante.');
+    if ((c.password || '').length < 6) throw new Error('Mot de passe : 6 caractères minimum.');
+    if (/^sb_secret_/.test(c.key) || /service_role/.test(c.key)) throw new Error('Cette clé est la clé SECRÈTE : prenez la clé « publishable » (sb_publishable_…) ou « anon ».');
+    await Cloud.backupNow(c);
+    await Cloud.setCloud({ ...c, enabled: true });
+    toast('Sauvegarde en ligne activée ✔'); routes.backup();
+  });
+  if ($('#cl-sql', v)) $('#cl-sql', v).onclick = async () => {
+    try { await navigator.clipboard.writeText(Cloud.SETUP_SQL); toast('Code copié'); }
+    catch (e) { await ask({ title: 'Code à coller dans Supabase', ok: 'OK', body: `<textarea class="i" rows="7" style="font-size:.75rem">${esc(Cloud.SETUP_SQL)}</textarea>` }); }
+  };
+  if ($('#cl-now', v)) $('#cl-now', v).onclick = (e) => busy(e.currentTarget, async () => { await Cloud.backupNow(); toast('Sauvegarde envoyée ✔'); routes.backup(); });
+  if ($('#cl-restore', v)) $('#cl-restore', v).onclick = () => pickAndRestore(cloud, async () => { location.hash = '#/home'; await boot(); });
+  if ($('#cl-off', v)) $('#cl-off', v).onclick = async () => {
+    if (needAdmin('backup')) return;
+    if (!(await ask({ title: 'Désactiver la sauvegarde en ligne ?', ok: 'Désactiver', danger: true }))) return;
+    await Cloud.setCloud({ ...cloud, enabled: false }); routes.backup();
+  };
+};
+
+// ---------------------------------------------------------------- routeur
+// Un seul écran se dessine à la fois : si on change d'écran pendant un chargement, le dernier demandé gagne.
+let rendering = null, renderAgain = false;
+async function render() {
+  if (rendering) { renderAgain = true; return rendering; }
+  rendering = (async () => { do { renderAgain = false; await renderNow(); } while (renderAgain); })();
+  try { await rendering; } finally { rendering = null; }
+}
+
+async function renderNow() {
+  try { REG = await L.getClientsReg(); } catch (e) { REG = []; }
+  if (cleanup) { try { cleanup(); } catch (e) {} cleanup = null; }
+  const raw = location.hash.replace(/^#\/?/, '') || 'home';
+  const [path, qs] = raw.split('?');
+  const [name, arg, arg2] = path.split('/');
+  const q = new URLSearchParams(qs || '');
+  if (!connected) { await routes.login(); return; }
+  if (!(await L.isInitialized()) && name !== 'welcome' && name !== 'cloud') { location.hash = '#/welcome'; return; }
+  const fn = routes[name] || routes.home;
+  try { await fn(arg, q, arg2); }
+  catch (e) { console.error(e); view(`<div class="flash err">Erreur : ${esc(e.message)}</div>`); }
+}
+
+// Logo par défaut (fourni avec l'appli) tant qu'aucun autre n'est choisi dans Réglages.
+async function defaultLogo() {
   try {
-    const r = await ai('photo_article', { image: dataUrl.split(',')[1], catalogue: cat.map(c => c.nom) });
-    const it = catItem(r.article); if (it) { l.article = it.nom; l.prix = it.prix; }
-    const notes = [...(r.taches || []).map(x => 'tache : ' + x), ...(r.degats || []).map(x => 'dégât : ' + x)].join(', ');
-    if (notes) l.notes = notes;
-    l.ia = [r.article, r.couleur, r.confiance ? 'confiance ' + r.confiance : ''].filter(Boolean).join(' · ');
-    if (state.view === 'nouvelle') render(); toast('Article reconnu : ' + l.article);
-  } catch (e) { toast('IA indisponible : choisissez l\'article à la main.'); }
-};
-ACT.saveFacture = () => {
-  const d = state.draft, u = currentUser();
-  if (!d.lignes.length && !(+d.arriere.montant)) return toast('Ajoutez au moins un article (ou un arriéré).');
-  if (+d.remiseManuelle > 0 && !d.remiseMotif.trim()) return toast('Indiquez le motif de la remise.');
-  let cid = d.clientId;
-  if (!cid) { if (!d.clientNom.trim()) return toast('Choisissez ou créez le client.'); cid = put('clients', { nom: d.clientNom.trim(), tel: d.clientTel.trim(), createdAt: Date.now() }).id; }
-  d.clientId = cid; choosePromo(d); const c = calcFacture(d);
-  const f = {
-    id: d.id, numero: numeroFacture(), code: String(Math.floor(1000 + Math.random() * 9000)), clientId: cid, type: 'normale', createdAt: Date.now(), createdBy: u.id,
-    lignes: d.lignes.map(l => { const cous = d.envoiCousin && !!l.cousin; return { id: l.id || uid(), article: l.article, qte: +l.qte || 1, prix: +l.prix || 0, montant: (+l.prix || 0) * (+l.qte || 1), notes: l.notes || '', photoId: l.photoId || null, cousin: cous, cousinStatut: cous ? 'a_envoyer' : null }; }),
-    express: d.express, promoId: c.remisePromo ? d.promoId : null, remisePromo: c.remisePromo, remiseManuelle: c.remiseManuelle, remiseMotif: d.remiseMotif, majoration: c.maj,
-    arriere: c.arriere ? { montant: c.arriere, motif: d.arriere.motif } : null, sousTotal: c.sousTotal, total: c.total,
-    dateRetrait: d.lignes.length ? d.dateRetrait : null, statut: d.lignes.length ? 'recu' : 'retire', paiements: [], annulee: false
-  };
-  if (+d.acompte > 0) f.paiements.push({ id: uid(), montant: Math.min(+d.acompte, c.total), mode: d.modeAcompte, date: Date.now(), user: u.id });
-  put('factures', f); if (c.remiseManuelle) logJ('remise', f, c.remiseManuelle, d.remiseMotif);
-  state.draft = null; state.cq = ''; toast('Facture ' + f.numero + ' enregistrée'); go('facture', f.id);
-};
-// Commandes & facture
-ACT.filtre = a => { state.filtre = a.dataset.v; render(); };
-ACT.statut = async a => {
-  const f = get('factures', a.dataset.id), s = a.dataset.s; if (f.statut === s) return;
-  if (s === 'retire') {
-    if (reste(f) > 0 && !await confirmBox(`Il reste ${F(reste(f))} à payer. Remettre quand même les habits ?`, 'Oui, remettre', 'Non')) return;
-    const code = await promptBox('Code de retrait donné par le client (laissez vide pour passer) :', 'text');
-    if (code && code !== f.code && !await confirmBox('Code incorrect ! Remettre quand même ?', 'Oui', 'Non')) return;
-    if (reste(f) > 0) logJ('retrait_impaye', f, reste(f)); f.retireAt = Date.now();
-  }
-  f.statut = s; put('factures', f); render();
-  if (s === 'pret') { const c = get('clients', f.clientId); if (c) modal(waModal('Prévenir ' + c.nom + ' que c\'est prêt ?', msgPret(f, c), c.tel)); }
-};
-FORMS.paiement = v => { const f = get('factures', v.id), m = +v.montant; if (!(m > 0)) return toast('Montant invalide'); f.paiements = f.paiements || []; f.paiements.push({ id: uid(), montant: Math.min(m, reste(f)), mode: v.mode, date: Date.now(), user: currentUser().id }); put('factures', f); logJ('paiement', f, m, v.mode); toast('Paiement de ' + F(m) + ' enregistré'); render(); };
-ACT.delPaiement = async a => { if (!await confirmBox('Supprimer ce paiement ?')) return; const f = get('factures', a.dataset.f), p = f.paiements.find(x => x.id === a.dataset.p); f.paiements = f.paiements.filter(x => x.id !== a.dataset.p); put('factures', f); logJ('paiement_supprime', f, p?.montant); render(); };
-ACT.annuler = async a => { const f = get('factures', a.dataset.id), motif = await promptBox('Motif de l\'annulation :'); if (!motif) return; Object.assign(f, { annulee: true, annuleMotif: motif, annuleBy: currentUser().id, annuleAt: Date.now() }); put('factures', f); logJ('annulation', f, f.total, motif); toast('Facture annulée'); render(); };
-ACT.recuWa = a => { const f = get('factures', a.dataset.id), c = get('clients', f.clientId); modal(waModal('Envoyer le reçu', msgRecu(f, c), c?.tel)); };
-ACT.lienPaiement = async a => {
-  const f = get('factures', a.dataset.id), c = get('clients', f.clientId), r = reste(f); let lien = '';
-  modal(waModal('Demander le paiement', `Bonjour ${c?.nom || ''}, voici le paiement de votre facture ${f.numero} chez ${db.settings.nom} : ${F(r)}. ${lien ? 'Payez en ligne (MoMo, Moov, carte) : ' + lien : infosPaiement()} Merci !`.replace(/\s+/g, ' '), c?.tel));
-};
-ACT.imprimer = a => {
-  if (isNative) { const f = get('factures', a.dataset.id); return shareText(msgRecu(f, get('clients', f.clientId)), 'Reçu ' + f.numero); } // vers WhatsApp ou l'imprimante Bluetooth (RawBT)
-  const f = get('factures', a.dataset.id), c = get('clients', f.clientId), S = db.settings;
-  $('#print').innerHTML = `<div style="font-family:monospace;max-width:300px;font-size:13px;line-height:1.5"><h3 style="margin:0">${esc(S.nom)}</h3><div>${esc(S.adresse)} ${esc(S.tel)}</div><hr>Facture ${esc(f.numero)}<br>${new Date(f.createdAt).toLocaleString('fr-FR')}<br>Client : ${esc(c?.nom)} ${esc(c?.tel || '')}<hr>${f.lignes.map(l => `${l.qte} x ${esc(l.article)} : ${F(l.montant)}${l.notes ? '<br><small>' + esc(l.notes) + '</small>' : ''}`).join('<br>')}${f.arriere ? `<br>Arriéré : ${F(f.arriere.montant)}` : ''}${f.remisePromo ? `<br>Promotion : -${F(f.remisePromo)}` : ''}${f.remiseManuelle ? `<br>Remise : -${F(f.remiseManuelle)}` : ''}<hr><b>Total : ${F(f.total)}</b><br>Payé : ${F(paye(f))}<br>Reste : ${F(reste(f))}<br>${f.dateRetrait ? 'Retrait prévu : ' + dFR(f.dateRetrait) + '<br>' : ''}<b>Code de retrait : ${f.code}</b><hr>${esc(infosPaiement())}<br>Merci de votre confiance !</div>`;
-  document.body.classList.add('printing'); setTimeout(() => { try { window.print(); } catch { toast('Impression impossible ici'); } document.body.classList.remove('printing'); }, 60);
-};
-ACT.toCousin = a => { const f = get('factures', a.dataset.f), l = f.lignes.find(x => x.id === a.dataset.l); l.cousin = true; l.cousinStatut = 'a_envoyer'; put('factures', f); toast('Ajouté à la liste pour le cousin'); render(); };
-// Cousin
-ACT.envoyerCousin = () => {
-  const aEnv = lignesCousin().filter(x => x.l.cousinStatut === 'a_envoyer'), S = db.settings, now = Date.now(), touched = new Set();
-  const txt = `Bonjour ${S.cousin.nom}, voici les habits envoyés par ${S.nom} le ${new Date().toLocaleDateString('fr-FR')} :\n` + aEnv.map(x => `- ${x.l.qte} × ${x.l.article} (${x.f.numero} · ${clientNom(x.f.clientId)})${x.l.notes ? ' : ' + x.l.notes : ''}`).join('\n') + `\nTotal : ${sumQ(aEnv)} pièce(s). Merci !`;
-  aEnv.forEach(x => { x.l.cousinStatut = 'chez_cousin'; x.l.sentAt = now; if (x.f.statut === 'recu') x.f.statut = 'en_cours'; touched.add(x.f); });
-  touched.forEach(f => put('factures', f)); render(); modal(waModal('Bordereau pour le cousin', txt, S.cousin.tel));
-};
-ACT.cousinRevenu = a => { const f = get('factures', a.dataset.f), l = f.lignes.find(x => x.id === a.dataset.l); l.cousinStatut = 'revenu'; l.backAt = Date.now(); put('factures', f); toast('Pièce revenue du cousin'); render(); };
-ACT.cousinGarder = a => { const f = get('factures', a.dataset.f), l = f.lignes.find(x => x.id === a.dataset.l); l.cousin = false; l.cousinStatut = null; put('factures', f); render(); };
-// Clients
-ACT.newClient = () => modal(clientForm());
-ACT.editClient = a => modal(clientForm(get('clients', a.dataset.id)));
-FORMS.client = v => { const old = v.id ? get('clients', v.id) : { createdAt: Date.now() }; const c = put('clients', { ...old, id: v.id || undefined, nom: v.nom.trim(), tel: v.tel.trim(), quartier: v.quartier.trim(), notes: v.notes.trim() }); closeModal(); toast('Client enregistré'); if (!v.id) go('client', c.id); else render(); };
-ACT.arriereClient = a => modal(`<h2>Ajouter un arriéré</h2><p class="mut">Pour une ancienne dette de ce client (cahier, avant l'application…).</p><form data-form="arriere"><input type="hidden" name="cid" value="${a.dataset.id}"><label>Montant</label><input name="m" type="number" min="1" inputmode="numeric" required><label>Motif</label><input name="motif" placeholder="Ex. dette du cahier, 2025"><div class="row" style="margin-top:12px"><button class="btn p">Ajouter</button><button type="button" class="btn" data-act="closeModal">Annuler</button></div></form>`);
-FORMS.arriere = v => { const m = +v.m; if (!(m > 0)) return; const f = put('factures', { numero: numeroFacture(), type: 'arriere', clientId: v.cid, createdAt: Date.now(), createdBy: currentUser().id, lignes: [], arriere: { montant: m, motif: v.motif }, sousTotal: 0, total: m, statut: 'retire', paiements: [], annulee: false, code: '' }); logJ('arriere', f, m, v.motif); closeModal(); toast('Arriéré de ' + F(m) + ' ajouté'); render(); };
-// Recouvrement
-ACT.relance = a => { const c = get('clients', a.dataset.id), r = risqueClient(c.id); modal(`<h2>Relancer ${esc(c.nom)} · ${F(r.solde)}</h2><p class="mut" style="margin-top:0">${esc(momentRelance().txt)}</p><div class="row"><button class="btn sm" data-act="relTon" data-id="${c.id}" data-t="poli">Ton poli</button><button class="btn sm" data-act="relTon" data-id="${c.id}" data-t="ferme">Ton ferme</button>${aiReady() ? `<button class="btn sm a" data-act="relIA" data-id="${c.id}">${ic('spark')}Rédiger avec l'IA</button>` : ''}</div><div style="margin-top:8px">${waModal('', messageRelance(c, r, r.score >= 60 ? 'ferme' : 'poli'), c.tel, c.id).replace('<h2></h2>', '')}</div>`); };
-ACT.relTon = a => { const c = get('clients', a.dataset.id); $('#mtxt').value = messageRelance(c, risqueClient(c.id), a.dataset.t); };
-ACT.relIA = async a => { const c = get('clients', a.dataset.id), r = risqueClient(c.id), t = $('#mtxt'); t.value = 'Rédaction en cours…'; try { t.value = await ai('relance', { client: { nom: c.nom, doit: F(r.solde), jours_de_retard: r.jours, nb_factures: r.nb, profil: r.label }, ton: r.score >= 60 ? 'ferme mais respectueux' : 'amical', pressing: db.settings.nom, paiement: infosPaiement() }); } catch (e) { t.value = messageRelance(c, r, 'poli'); toast('IA indisponible'); } };
-// Caisse
-ACT.cloture = () => { const adm = isAdmin(), a = cashAttendu(today()); modal(`<h2>Clôture de caisse — ${dFR(new Date())}</h2><form data-form="cloture"><p class="mut" style="margin-top:0">Comptez l'argent liquide (sans le fond de caisse) et notez le total Mobile Money reçu aujourd'hui d'après les SMS.</p><label>Espèces comptées</label><input name="esp" type="number" min="0" inputmode="numeric" required><label>Mobile Money reçu (facultatif)</label><input name="momo" type="number" min="0" inputmode="numeric"><label>Remarque</label><input name="note">${adm ? `<p class="mut" style="font-size:13px">Enregistré dans l'application : espèces ${F(a.esp)}, Mobile Money ${F(a.momo)}.</p>` : ''}<div class="row" style="margin-top:12px"><button class="btn p">Valider</button><button type="button" class="btn" data-act="closeModal">Annuler</button></div></form>`); };
-FORMS.cloture = v => { const a = cashAttendu(today()), c = put('clotures', { date: today(), user: currentUser().id, especesDeclarees: +v.esp || 0, especesAttendues: a.esp, momoDeclare: v.momo === '' ? null : +v.momo, momoAttendu: a.momo, note: v.note, createdAt: Date.now() }); closeModal(); const e = c.especesDeclarees - c.especesAttendues; toast(isAdmin() ? (Math.abs(e) < 500 ? 'Caisse juste. Bravo !' : 'Écart de caisse : ' + F(e)) : 'Clôture enregistrée. Merci !'); render(); };
-// Promotions
-ACT.newPromo = () => modal(promoForm());
-ACT.editPromo = a => modal(promoForm(get('promotions', a.dataset.id)));
-ACT.delPromo = async a => { if (!await confirmBox('Supprimer cette promotion ?')) return; const p = get('promotions', a.dataset.id); p.deleted = true; put('promotions', p); render(); };
-ACT.useSug = a => modal(promoForm({ ...state.sugs[+a.dataset.i], actif: true }));
-FORMS.promo = v => { const S = db.settings, old = v.id ? get('promotions', v.id) : { createdAt: Date.now() }; put('promotions', { ...old, id: v.id || undefined, nom: v.nom.trim(), type: v.type, valeur: +v.valeur, debut: v.debut || '', fin: v.fin || '', jours: JOURS.map((_, i) => v['j' + i] ? i : null).filter(x => x !== null), articles: S.catalogue.filter((c, i) => v['a' + i]).map(c => c.nom), cible: v.cible, minimum: +v.minimum || 0, actif: !!v.actif }); closeModal(); toast('Promotion enregistrée'); render(); };
-ACT.promosIA = async () => {
-  toast('L\'IA cherche des idées…');
-  const fs = all('factures').filter(f => !f.annulee && f.type !== 'arriere' && f.createdAt > Date.now() - 56 * 864e5), by = [0, 0, 0, 0, 0, 0, 0]; fs.forEach(f => by[new Date(f.createdAt).getDay()] += f.total);
-  try {
-    const r = await ai('promos', { date: today(), stats: { chiffre_par_jour_8_semaines: Object.fromEntries(JOURS.map((j, i) => [j, by[i]])), panier_moyen: fs.length ? Math.round(fs.reduce((s, f) => s + f.total, 0) / fs.length) : 0, clients_inactifs_2_mois: all('clients').filter(c => { const l = dernierPassage(c.id); return l && Date.now() - l > 60 * 864e5; }).length, articles: topArticles(90), catalogue: db.settings.catalogue.map(c => c.nom + ' ' + c.prix + ' F'), promotions_existantes: all('promotions').map(p => p.nom) }, evenements: evenementsProches(75).map(e => ({ nom: e.nom, date: ymd(e.date), approximative: !!e.approx })) });
-    state.sugsIA = (Array.isArray(r) ? r : []).map(s => ({ ...s, valeur: +s.valeur || 10, articles: (s.articles || []).filter(n => catItem(n)).map(n => catItem(n).nom) })); render(); toast(state.sugsIA.length + ' idée(s) ajoutée(s)');
-  } catch (e) { toast('IA : ' + e.message); }
-};
-// Assistant
-FORMS.ask = async (v, f) => {
-  const q = (v.q || '').trim(); if (!q) return; f && f.reset();
-  state.chat.push({ me: true, t: q }); renderChat();
-  let ans = repondreLocal(q);
-  if (!ans) {
-    if (aiReady()) { state.chat.push({ t: 'Je réfléchis…', wait: true }); renderChat(); try { ans = await ai('assistant', { question: q, donnees: resumeDonnees() }); } catch (e) { ans = 'Je n\'ai pas pu joindre l\'IA (' + e.message + ').'; } state.chat = state.chat.filter(m => !m.wait); }
-    else ans = 'Hors ligne, je réponds sur : argent encaissé, impayés, cousin, commandes prêtes, meilleurs clients et résumé de la semaine. Pour les autres questions, ajoutez la clé API Claude dans Paramètres.';
-  }
-  state.chat.push({ t: ans }); renderChat();
-};
-ACT.askQ = a => FORMS.ask({ q: a.dataset.q });
-ACT.askMic = () => ecouter(t => FORMS.ask({ q: t }));
-ACT.speak = a => parler(state.chat[+a.dataset.i].t);
-ACT.waChat = a => { const t = state.chat[+a.dataset.i].t; if (isNative) { a.setAttribute('href', '#'); waOpen(db.settings.tel, t, {}); } else a.href = wa(db.settings.tel, t); };
-// Détachage
-ACT_CHANGE.detPhoto = async t => { if (!t.files[0]) return; state.detPhoto = await compressImage(t.files[0], 900, 0.7); const i = $('#detPrev'); i.src = state.detPhoto; i.hidden = false; };
-FORMS.detachage = async v => {
-  const z = $('#detRes');
-  if (!aiReady()) { z.innerHTML = '<div class="card ia">IA hors ligne : utilisez le guide rapide ci-dessous.</div>'; return; }
-  if (!state.detPhoto) { z.innerHTML = '<div class="card ia">Ajoutez d\'abord une photo de la tache.</div>'; return; }
-  z.innerHTML = '<div class="card ia">Analyse en cours…</div>';
-  try { const r = await ai('detachage', { image: state.detPhoto.split(',')[1], tissu: v.tissu, couleur: v.couleur, tache: v.tache }); z.innerHTML = `<div class="card ia" style="white-space:pre-wrap">${esc(r)}</div>`; }
-  catch (e) { z.innerHTML = `<div class="card">Erreur IA : ${esc(e.message)}</div>`; }
-};
-// Paramètres
-FORMS.login = v => { const u = db.settings.users.find(x => x.id === v.u); if (!u || u.pin !== v.pin) return toast('Code PIN incorrect'); safeSet(LS_USER, u.id); render(); };
-FORMS.reglages = v => { const S = db.settings; Object.assign(S, { nom: v.nom.trim() || 'MonPressing', tel: v.tel.trim(), adresse: v.adresse.trim(), momo: { mtn: v.mtn.trim(), moov: v.moov.trim(), celtiis: v.celtiis.trim() }, cousin: { nom: v.cnom.trim(), tel: v.ctel.trim() }, capaciteJour: +v.capaciteJour || 40, expressMajoration: +v.express || 0, moisPluies: MOIS.map((_, i) => v['m' + (i + 1)] ? i + 1 : null).filter(Boolean) }); saveSettings(); toast('Réglages enregistrés'); render(); };
-ACT.addCat = () => { db.settings.catalogue.push({ nom: 'Nouvel article', prix: 500, delai: 2, cousin: false, coutCousin: 0 }); saveSettings(); render(); };
-ACT.delCat = async a => { if (!await confirmBox('Retirer cet article du catalogue ?')) return; db.settings.catalogue.splice(+a.dataset.i, 1); saveSettings(); render(); };
-FORMS.user = v => { if (!/^\d{4,6}$/.test(v.pin)) return toast('Le PIN doit avoir 4 à 6 chiffres'); db.settings.users.push({ id: uid(), nom: v.nom.trim(), role: v.role, pin: v.pin }); saveSettings(); toast('Utilisateur ajouté'); render(); };
-ACT.pinUser = async a => { const p = await promptBox('Nouveau code PIN (4 à 6 chiffres) :', 'password'); if (!p) return; if (!/^\d{4,6}$/.test(p)) return toast('Le PIN doit avoir 4 à 6 chiffres'); db.settings.users.find(u => u.id === a.dataset.id).pin = p; saveSettings(); toast('PIN modifié'); render(); };
-ACT.delUser = async a => { const us = db.settings.users, u = us.find(x => x.id === a.dataset.id); if (u.role === 'admin' && us.filter(x => x.role === 'admin').length < 2) return toast('Il faut garder au moins un administrateur'); if (!await confirmBox('Supprimer ' + u.nom + ' ?')) return; db.settings.users = us.filter(x => x.id !== u.id); saveSettings(); render(); };
-ACT.export = async () => { const r = await shareFile(new Blob([JSON.stringify(await exportAll())], { type: 'application/json' }), 'monpressing-' + today() + '.json', 'Sauvegarde MonPressing'); if (r !== 'cancelled') { safeSet('lastExport', new Date().toISOString()); toast('Sauvegarde créée : gardez-la sur WhatsApp, Drive ou par e-mail'); render(); } };
-ACT_CHANGE.import = async t => { try { const d = JSON.parse(await t.files[0].text()); t.value = ''; if (!await confirmBox('Remplacer toutes les données de ce téléphone par cette sauvegarde ?', 'Oui, restaurer', 'Annuler')) return; await importAll(d); toast('Sauvegarde restaurée'); render(); } catch (e) { toast('Restauration impossible : ' + e.message); } };
-ACT.demo = () => {
-  const noms = [['Mme Houngbo Rachelle', '0197112233', 'Cadjèhoun'], ['M. Agossou Fidèle', '0166445511', 'Fidjrossè'], ['Mme Dossou Clarisse', '0195887766', 'Akpakpa'], ['M. Akpovi Serge', '0161223344', 'Gbégamey'], ['Mlle Zinsou Prisca', '0190556677', 'Zogbo'], ['M. Adjovi Landry', '0167889900', 'Calavi']];
-  const cs = noms.map(([nom, tel, quartier]) => put('clients', { nom, tel, quartier, demo: true, createdAt: Date.now() - 90 * 864e5 }));
-  const cat = db.settings.catalogue, u = currentUser().id;
-  for (let i = 0; i < 26; i++) {
-    const c = cs[i % cs.length], t = Date.now() - Math.floor(Math.random() * 60) * 864e5 - 3600e3, age = (Date.now() - t) / 864e5, lignes = [];
-    for (let k = 0, n = 1 + Math.floor(Math.random() * 4); k < n; k++) { const it = cat[Math.floor(Math.random() * cat.length)], q = 1 + Math.floor(Math.random() * 3), co = it.cousin && Math.random() < .8; lignes.push({ id: uid(), article: it.nom, qte: q, prix: it.prix, montant: q * it.prix, notes: Math.random() < .2 ? 'tache au col' : '', cousin: co, cousinStatut: co ? (age > 5 ? 'revenu' : age > 1 ? 'chez_cousin' : 'a_envoyer') : null, sentAt: co && age > 1 ? t + 864e5 : null, backAt: co && age > 5 ? t + 4 * 864e5 : null }); }
-    const tot = lignes.reduce((s, l) => s + l.montant, 0), r = Math.random(), pay = [];
-    if (r < .6) pay.push({ id: uid(), montant: tot, mode: ['especes', 'mtn', 'moov'][i % 3], date: t, user: u }); else if (r < .85) pay.push({ id: uid(), montant: Math.round(tot / 200) * 100, mode: 'mtn', date: t, user: u });
-    put('factures', { demo: true, numero: 'MP' + ymd(t).slice(2).replace(/-/g, '') + '-D' + String(i).padStart(2, '0'), code: String(1000 + i * 37), clientId: c.id, type: 'normale', createdAt: t, createdBy: u, lignes, express: false, promoId: null, remisePromo: 0, remiseManuelle: 0, majoration: 0, arriere: null, sousTotal: tot, total: tot, dateRetrait: ymd(t + 3 * 864e5), statut: age > 6 ? 'retire' : age > 3 ? 'pret' : age > 1 ? 'en_cours' : 'recu', paiements: pay, annulee: false });
-  }
-  put('factures', { demo: true, numero: 'MP-ARR-01', type: 'arriere', clientId: cs[1].id, createdAt: Date.now() - 40 * 864e5, createdBy: u, lignes: [], arriere: { montant: 7500, motif: 'Dette du cahier (2025)' }, sousTotal: 0, total: 7500, statut: 'retire', paiements: [], annulee: false, code: '' });
-  put('promotions', { demo: true, nom: 'Mardi malin', type: 'pourcent', valeur: 15, jours: [2], articles: [], cible: 'tous', minimum: 0, actif: true, debut: '', fin: '', createdAt: Date.now() });
-  toast('Données de démonstration chargées'); render();
-};
-ACT.demoOff = async () => { if (!await confirmBox('Supprimer toutes les données de démonstration ?')) return; COLLS.forEach(c => db[c].forEach(r => { if (r.demo && !r.deleted) { r.deleted = true; r.updatedAt = Date.now(); } })); persist(); toast('Données de démo supprimées'); render(); };
+    const blob = await (await fetch('img/logo.jpg')).blob();
+    return await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(''); r.readAsDataURL(blob); });
+  } catch (e) { return ''; }
+}
 
-// Sauvegarde en ligne & IA
-FORMS.cloud = v => { safeSet('cloud', { url: cloud.normalizeUrl(v.url), key: (v.key || '').trim(), password: v.password || '', enabled: !!v.enabled }); toast('Sauvegarde en ligne enregistrée'); render(); autoBackup(); };
-ACT.cloudNow = async () => { const c = getCloud(); if (!c.url || !c.key || !c.password) return toast('Remplissez et enregistrez d\'abord l\'adresse, la clé et le mot de passe.'); toast('Envoi de la sauvegarde…'); try { const r = await backupNow(); toast('Sauvegarde envoyée (' + Math.round(r.size / 1024) + ' ko)'); } catch (e) { safeSet('cloudLast', { at: new Date().toISOString(), ok: false, error: e.message }); toast(e.message); } render(); };
-ACT.cloudRestore = () => { const c = getCloud(); modal(`<h2>Restaurer depuis internet</h2><form data-form="cloudList"><label>Adresse du projet Supabase</label><input name="url" required value="${esc(c.url)}" placeholder="https://xxxx.supabase.co"><label>Clé publique</label><input name="key" required value="${esc(c.key)}"><label>Mot de passe de sauvegarde</label><input name="password" type="password" required value="${esc(c.password)}"><div class="row" style="margin-top:12px"><button class="btn p">Voir les sauvegardes</button><button type="button" class="btn" data-act="closeModal">Annuler</button></div></form><div id="cloudList" style="margin-top:10px"></div>`); };
-FORMS.cloudList = async v => { const c = { ...getCloud(), url: cloud.normalizeUrl(v.url), key: v.key.trim(), password: v.password }, z = $('#cloudList'); z.innerHTML = '<p class="mut">Recherche…</p>'; try { const l = await cloud.listBackups(c); state.cloudTmp = c; z.innerHTML = l.length ? l.slice(0, 15).map(b => `<div class="lrow"><span>${dFR(b.date)} <span class="mut">${b.size ? Math.round(b.size / 1024) + ' ko' : ''}</span></span><button class="btn sm p" data-act="cloudPick" data-n="${esc(b.name)}">Restaurer</button></div>`).join('') : '<p class="mut">Aucune sauvegarde trouvée.</p>'; } catch (e) { z.innerHTML = `<p class="pill bad" style="white-space:normal">${esc(e.message)}</p>`; } };
-ACT.cloudPick = async a => { const c = state.cloudTmp, name = a.dataset.n; if (!await confirmBox('Remplacer toutes les données de ce téléphone par la sauvegarde du ' + dFR(name.slice(11, 21)) + ' ?', 'Oui, restaurer', 'Annuler')) return; toast('Restauration…'); try { await importAll(await cloud.downloadBackup(c, name, c.password)); safeSet('cloud', { ...c, enabled: true }); toast('Données restaurées'); render(); } catch (e) { toast(e.message); } };
-FORMS.iacfg = v => { setCfg({ iaKey: (v.iaKey || '').trim(), ia: !!v.ia }); toast('Réglage IA enregistré'); render(); };
-ACT.iaTest = async () => { toast('Test de l\'IA…'); try { const r = await ai('assistant', { question: 'Réponds seulement : « L’IA fonctionne. »', donnees: {} }); toast(r.slice(0, 90)); } catch (e) { toast('IA : ' + e.message); } };
+let autoTimer = null;
+function startAutoBackup() {
+  const run = () => Cloud.autoBackup((ok) => { if (ok) toast('☁️ Sauvegarde du soir envoyée'); });
+  if (!autoTimer) {
+    autoTimer = setInterval(run, 15 * 60e3);
+    window.addEventListener('online', run);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) run(); });
+  }
+  setTimeout(run, 4000);
+}
 
-// ---------- Écouteurs globaux ----------
-document.addEventListener('click', e => {
-  const a = e.target.closest('[data-act]'); if (!a) return; const fn = ACT[a.dataset.act]; if (!fn) return;
-  // Appel synchrone : les liens WhatsApp reçoivent leur adresse avant que le navigateur ne les suive
-  try { const r = fn(a, e); if (r && r.catch) r.catch(err => toast('Erreur : ' + err.message)); } catch (err) { toast('Erreur : ' + err.message); }
-  if (a.tagName === 'A' && (a.getAttribute('href') || '#') === '#') e.preventDefault();
-});
-document.addEventListener('submit', e => { const f = e.target; if (!f.dataset.form) return; e.preventDefault(); Promise.resolve(FORMS[f.dataset.form]?.(Object.fromEntries(new FormData(f)), f)).catch(err => toast('Erreur : ' + err.message)); });
-document.addEventListener('input', e => {
-  const t = e.target, d = state.draft;
-  if (t.id === 'cq') { state.cq = t.value; renderCRes(); return; }
-  if (t.id === 'qsearch') { state.q = t.value; $('#liste').innerHTML = listeCommandes(); return; }
-  if (t.id === 'clq') { state.clq = t.value; $('#cliste').innerHTML = listeClients(); return; }
-  if (!d) return;
-  if (t.dataset.d) { setPath(d, t.dataset.d, t.type === 'number' ? (+t.value || 0) : t.value); if (t.dataset.d === 'dateRetrait') d.dateManuelle = true; refreshTotaux(); }
-  else if (t.dataset.l !== undefined && t.dataset.k && t.dataset.k !== 'article') { const l = d.lignes[+t.dataset.l]; if (l) { l[t.dataset.k] = t.type === 'number' ? (+t.value || 0) : t.value; refreshTotaux(); } }
-});
-document.addEventListener('change', e => {
-  const t = e.target, d = state.draft;
-  if (t.dataset.actChange) { Promise.resolve(ACT_CHANGE[t.dataset.actChange]?.(t, e)).catch(err => toast('Erreur : ' + err.message)); return; }
-  if (t.dataset.cfgchk) { setCfg({ [t.dataset.cfgchk]: t.checked }); render(); return; }
-  if (t.dataset.cat !== undefined) { const c = db.settings.catalogue[+t.dataset.cat], k = t.dataset.ck; c[k] = t.type === 'checkbox' ? t.checked : t.type === 'number' ? (+t.value || 0) : t.value.trim(); saveSettings(); toast('Tarif enregistré'); return; }
-  if (!d) return;
-  if (t.dataset.k === 'article') { const l = d.lignes[+t.dataset.l]; l.article = t.value; l.prix = catItem(t.value)?.prix || 0; render(); }
-  else if (t.dataset.dchk) { d[t.dataset.dchk] = t.checked; render(); }
-  else if (t.dataset.lchk !== undefined) { d.lignes[+t.dataset.lchk].cousin = t.checked; render(); }
-  else if (t.dataset.dsel) { d[t.dataset.dsel] = t.value || null; if (t.dataset.dsel === 'promoId') d.promoAuto = false; render(); }
-});
-window.addEventListener('hashchange', route);
-window.addEventListener('online', () => { renderSyncBadge(); autoBackup(); });
-window.addEventListener('offline', renderSyncBadge);
-
-// ---------- Démarrage ----------
 async function boot() {
-  for (const k of ['user', 'cfg', 'cloud', 'cloudLast', 'cloudLastOk', 'lastExport']) KV[k] = await store.kv(k);
-  db = loadDB(await store.kv(LS_DB));
-  route();
-  autoBackup(); setInterval(autoBackup, 15 * 60e3);
+  IA = (await db.kv('ia')) || { key: '', on: true };
+  S = await L.getSettings();
+  if (await L.isInitialized()) {
+    await L.migrateClients();
+    await L.migrateVolumePromo();
+    S = await L.getSettings();
+    startAutoBackup();
+    if (isNative && !(await db.kv('reminderScheduled'))) { if (await scheduleMonthlyReminder(S.monthlyReport !== false)) await db.kv('reminderScheduled', true); }
+  }
+  if (!S.logo && !(await db.kv('logoRemoved'))) {
+    const d = await defaultLogo();
+    if (d) { S.logo = d; if (await L.isInitialized()) await L.saveSettings(S); }
+  }
+  await render();
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); else autoBackup(); });
-window.addEventListener('pagehide', flush);
+
+window.addEventListener('hashchange', async () => { const logo = S && S.logo; S = await L.getSettings(); if (!S.logo && logo && !(await db.kv('logoRemoved'))) { S.logo = logo; if (await L.isInitialized()) await L.saveSettings(S); } render(); });
+// Bouton retour Android : revenir en arrière dans l'appli plutôt que la fermer.
+if (isNative && window.Capacitor.registerPlugin) {
+  try {
+    const App = window.Capacitor.registerPlugin('App');
+    App.addListener('backButton', () => {
+      const h = location.hash;
+      if (!h || h === '#/home' || h === '#/welcome') App.exitApp(); else history.back();
+    });
+  } catch (e) {}
+}
 boot();

@@ -10,6 +10,16 @@ function open() {
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+      if (!db.objectStoreNames.contains('articles')) db.createObjectStore('articles', { keyPath: 'id', autoIncrement: true });
+      if (!db.objectStoreNames.contains('orders')) {
+        const s = db.createObjectStore('orders', { keyPath: 'number' });
+        s.createIndex('status', 'status');
+        s.createIndex('createdAt', 'createdAt');
+      }
+      if (!db.objectStoreNames.contains('expenses')) {
+        const s = db.createObjectStore('expenses', { keyPath: 'id', autoIncrement: true });
+        s.createIndex('date', 'date');
+      }
       if (!db.objectStoreNames.contains('photos')) db.createObjectStore('photos');
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };

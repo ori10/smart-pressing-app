@@ -35,10 +35,11 @@
         </provider>
     </application>
 
-    <!-- Applis WhatsApp que l'appli peut ouvrir, et reconnaissance vocale (dictée) -->
+    <!-- Applis WhatsApp que l'appli peut ouvrir -->
     <queries>
         <package android:name="com.whatsapp.w4b" />
         <package android:name="com.whatsapp" />
+        <!-- Dictée vocale (reconnaissance d'Android) -->
         <intent><action android:name="android.speech.RecognitionService" /></intent>
     </queries>
 
