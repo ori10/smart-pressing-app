@@ -72,7 +72,7 @@ Nouveau téléphone : installez l'appli → « Restaurer une sauvegarde ».
 
 ## MonPressing (deuxième appli, avec IA)
 Le dossier `monpressing/` contient une deuxième application construite de la même façon, avec en plus l'IA (photo des
-vêtements, dictée, relances, assistant, détachage) et une sauvegarde chiffrée dans le bucket Supabase `saves`.
+vêtements, dictée, relances, assistant, détachage) et sa sauvegarde chiffrée va dans le même bucket Supabase `sauvegardes`, dossier `monpressing/`.
 Elle a sa propre APK (`MonPressing.apk`, versions `monpressing-v1.0.N` dans Releases) et s'installe à côté de Smart Pressing.
 Détails : [monpressing/README.md](monpressing/README.md).
 

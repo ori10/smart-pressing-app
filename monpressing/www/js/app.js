@@ -1706,9 +1706,10 @@ routes.backup = async () => {
         <details><summary class="small muted">Modifier la configuration</summary><div class="stack" style="margin-top:10px">${cloudForm(cloud)}
         <div class="btns"><button class="btn primary" id="cl-save">Enregistrer</button><button class="btn danger" id="cl-off">Désactiver</button></div></div></details>`
       : `${isAdmin() ? `${cloudForm(cloud)}<button class="btn primary block" id="cl-save">Tester et activer</button>
-        <details class="guide"><summary>Comment faire ? (une seule fois, 5 minutes)</summary><ol>
+        <details class="guide"><summary>Comment faire ? (une seule fois, 5 minutes)</summary><p class="small"><b>Smart Pressing est déjà sauvegardée en ligne ?</b> Mettez la même adresse et la même clé (le mot de passe peut être différent) : rien à refaire dans Supabase, MonPressing range ses fichiers dans son propre dossier.</p><ol>
           <li>Sur <b>supabase.com</b>, créez un compte gratuit puis <b>New project</b> (nom : pressing ; région : Europe).</li>
-          <li>Menu <b>SQL Editor</b> → collez le code ci-dessous → <b>Run</b> : il crée le dossier <code>saves</code> (privé) et ses règles d'accès.<br><button class="btn sm" id="cl-sql" type="button">Copier le code</button></li>
+          <li>Menu <b>Storage</b> → <b>New bucket</b> → nom : <code>sauvegardes</code> (laissez « Public » décoché).</li>
+          <li>Menu <b>SQL Editor</b> → collez le code ci-dessous → <b>Run</b>.<br><button class="btn sm" id="cl-sql" type="button">Copier le code</button></li>
           <li>Menu <b>Project Settings → API Keys</b> : copiez l'<b>adresse du projet</b> (Project URL) et la clé <b>anon public</b> (ou <b>publishable</b>).</li>
           <li>Collez-les ici, choisissez un mot de passe, puis <b>Tester et activer</b>.</li></ol>
           <p class="small muted">Gardez le mot de passe et ces informations sur papier : ils seront demandés pour restaurer sur un nouveau téléphone.</p></details>` : '<p class="small muted" style="margin:0">Déverrouillez le mode admin pour l’activer.</p>'}`}

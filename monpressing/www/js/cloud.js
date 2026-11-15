@@ -3,7 +3,7 @@ import { db } from './db.js';
 import { exportAll, importAll, nowIso, todayIso } from './logic.js';
 
 const PREFIX = 'monpressing';
-export const BUCKET = 'saves';
+export const BUCKET = 'sauvegardes';
 
 export async function getCloud() { return (await db.kv('cloud')) || { enabled: false, url: '', key: '', password: '' }; }
 export async function setCloud(c) { await db.kv('cloud', c); }
@@ -46,10 +46,9 @@ function headers(c, extra = {}) {
   const k = c.key.trim();
   return { ...(k.startsWith('eyJ') ? { Authorization: 'Bearer ' + k } : {}), apikey: k, ...extra };
 }
-export const SETUP_SQL = `insert into storage.buckets (id, name, public) values ('saves', 'saves', false) on conflict (id) do nothing;
-create policy "monpressing_ajout" on storage.objects for insert to anon with check (bucket_id = 'saves' and (storage.foldername(name))[1] = 'monpressing');
-create policy "monpressing_maj" on storage.objects for update to anon using (bucket_id = 'saves' and (storage.foldername(name))[1] = 'monpressing');
-create policy "monpressing_lecture" on storage.objects for select to anon using (bucket_id = 'saves' and (storage.foldername(name))[1] = 'monpressing');`;
+export const SETUP_SQL = `create policy "pressing_ajout" on storage.objects for insert to anon with check (bucket_id = 'sauvegardes');
+create policy "pressing_maj" on storage.objects for update to anon using (bucket_id = 'sauvegardes');
+create policy "pressing_lecture" on storage.objects for select to anon using (bucket_id = 'sauvegardes');`;
 async function check(res, what) {
   if (res.ok) return res;
   let msg = '';

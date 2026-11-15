@@ -19,7 +19,7 @@ C'est une appli séparée (`com.monpressing.app`) : elle s'installe **à côté*
 | Plus › Assistant du patron | Questions en français, à l'écrit ou au micro ; réponses lues à voix haute ou envoyées sur WhatsApp |
 | Plus › Conseils de détachage | Photo de la tache → conseils de l'IA selon le tissu ; guide utilisable sans internet |
 | Plus › Intelligence artificielle | Clé API Claude (console.anthropic.com), gardée dans le téléphone et jamais mise dans les sauvegardes |
-| Sauvegarde | Sauvegarde chiffrée en ligne dans le bucket Supabase **`saves`** (`saves/monpressing/…`). Restaure aussi les **sauvegardes de Smart Pressing**. |
+| Sauvegarde | Sauvegarde chiffrée en ligne dans le **même bucket Supabase que Smart Pressing (`sauvegardes`)**, dans son propre dossier `sauvegardes/monpressing/`. Restaure aussi les **sauvegardes de Smart Pressing**. |
 
 Sans clé IA, tout marche quand même : la dictée, les idées de promotions, les profils, la date conseillée, la caisse
 et l'assistant fonctionnent avec des règles simples.
